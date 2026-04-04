@@ -16,6 +16,14 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 OUT_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, "output"))
 LOC_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, "location"))
 
+# Import overlay modules
+try:
+    from modules.heatmap import generate_density_map, normalize_density_map, draw_heatmap
+    from modules.incidents import IncidentDetector, draw_incidents
+    from modules.recommendations import generate_recommendations, draw_recommendations
+except ImportError:
+    pass  # Modules may not be available in API context
+
 router = APIRouter()
 
 _LAYER_NAMES = ["Background", "Aesthetic", "Guidelines", "Physical"]
@@ -648,6 +656,9 @@ def stream_cctv(
     show_label: bool = Query(default=True),
     show_tracking: bool = Query(default=True),
     show_roi: bool = Query(default=False),
+    show_heatmap: bool = Query(default=False),
+    show_incidents: bool = Query(default=False),
+    show_recommendations: bool = Query(default=False),
     start_frame: int = Query(default=0, ge=0),
 ):
     full = _safe_out_path(path)
@@ -694,6 +705,26 @@ def stream_cctv(
             if show_roi and roi_mask is not None:
                 _apply_roi_overlay(frame, roi_mask)
             _draw_cctv_objects(frame, objects, show_tracking=show_tracking, show_3d=show_3d, show_label=show_label)
+
+            # Apply traffic analysis overlays
+            try:
+                if show_heatmap:
+                    density_map = generate_density_map(objects, frame.shape)
+                    normalized_map = normalize_density_map(density_map)
+                    draw_heatmap(frame, normalized_map)
+                
+                if show_incidents:
+                    incident_detector = IncidentDetector()
+                    detections = incident_detector.process(objects, frame)
+                    if detections:
+                        draw_incidents(frame, detections)
+                
+                if show_recommendations:
+                    recommendations = generate_recommendations(objects, frame.shape)
+                    draw_recommendations(frame, recommendations)
+            except Exception as e:
+                # Silently skip overlays if modules unavailable
+                pass
 
             cv2.putText(
                 frame,

@@ -120,6 +120,11 @@ export default function Visualization() {
   const [showFov, setShowFov] = useState(false);
   const [fovFillPct, setFovFillPct] = useState(25);
 
+  // Overlay toggles
+  const [showHeatmap, setShowHeatmap] = useState(false);
+  const [showIncidents, setShowIncidents] = useState(false);
+  const [showRecommendations, setShowRecommendations] = useState(false);
+
   const cctvRef = useRef(null);
   const satRef = useRef(null);
   const timerRef = useRef(null);
@@ -220,6 +225,12 @@ export default function Visualization() {
         setShowSatBox((v) => !v);
       } else if (e.key.toLowerCase() === "f") {
         setShowFov((v) => !v);
+      } else if (e.key === "8") {
+        setShowHeatmap((v) => !v);
+      } else if (e.key === "9") {
+        setShowIncidents((v) => !v);
+      } else if (e.key === "0") {
+        setShowRecommendations((v) => !v);
       }
     }
     window.addEventListener("keydown", onKeyDown);
@@ -268,6 +279,9 @@ export default function Visualization() {
       show_label: String(showLabel),
       show_tracking: String(showTracking),
       show_roi: String(showRoi),
+      show_heatmap: String(showHeatmap),
+      show_incidents: String(showIncidents),
+      show_recommendations: String(showRecommendations),
       start_frame: String(startFrame),
       nonce: String(streamNonce),
     });
@@ -280,6 +294,9 @@ export default function Visualization() {
     showLabel,
     showTracking,
     showRoi,
+    showHeatmap,
+    showIncidents,
+    showRecommendations,
     startFrame,
     streamNonce,
   ]);
@@ -624,6 +641,37 @@ export default function Visualization() {
                 >
                   {">>"}
                 </button>
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="card-title">Traffic Analysis Overlays</div>
+              <div style={{ display: "grid", gap: 7 }}>
+                <BoolRow
+                  label="Heatmap (8)"
+                  checked={showHeatmap}
+                  onChange={setShowHeatmap}
+                />
+                <BoolRow
+                  label="Incidents (9)"
+                  checked={showIncidents}
+                  onChange={setShowIncidents}
+                />
+                <BoolRow
+                  label="Recommendations (0)"
+                  checked={showRecommendations}
+                  onChange={setShowRecommendations}
+                />
+              </div>
+              <div
+                style={{
+                  marginTop: 10,
+                  fontSize: 11,
+                  color: "rgba(200,216,240,0.5)",
+                }}
+              >
+                Real-time traffic analysis visualization with density mapping,
+                incident detection, and congestion recommendations.
               </div>
             </div>
 

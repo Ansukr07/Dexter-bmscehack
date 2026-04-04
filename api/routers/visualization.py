@@ -16,13 +16,25 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(_
 OUT_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, "output"))
 LOC_ROOT = os.path.abspath(os.path.join(PROJECT_ROOT, "location"))
 
-# Import overlay modules
+# Optional overlay/AI modules (desktop-first features that web can consume).
+generate_density_map = None
+normalize_density_map = None
+draw_heatmap = None
+IncidentDetector = None
+draw_incidents = None
+generate_recommendations = None
+draw_recommendations = None
+
+OVERLAY_FEATURES_AVAILABLE = False
+
 try:
     from modules.heatmap import generate_density_map, normalize_density_map, draw_heatmap
     from modules.incidents import IncidentDetector, draw_incidents
     from modules.recommendations import generate_recommendations, draw_recommendations
+
+    OVERLAY_FEATURES_AVAILABLE = True
 except ImportError:
-    pass  # Modules may not be available in API context
+    OVERLAY_FEATURES_AVAILABLE = False
 
 router = APIRouter()
 
@@ -579,6 +591,217 @@ def _frame_map(data: dict) -> dict:
     return {int(f.get("frame_index", 0)): (f.get("objects") or []) for f in data.get("frames", [])}
 
 
+_CLASS_ALIASES = {
+    "car": "car",
+    "bus": "bus",
+    "bike": "bike",
+    "bicycle": "bike",
+    "motorbike": "bike",
+    "motorcycle": "bike",
+    "truck": "truck",
+    "lorry": "truck",
+}
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(f):
+        return default
+    return f
+
+
+def _extract_obj_point(obj: dict) -> tuple[float | None, float | None]:
+    if not isinstance(obj, dict):
+        return None, None
+
+    x = _safe_float(obj.get("x"), np.nan)
+    y = _safe_float(obj.get("y"), np.nan)
+    if np.isfinite(x) and np.isfinite(y):
+        return float(x), float(y)
+
+    ref = obj.get("reference_point")
+    if isinstance(ref, (list, tuple)) and len(ref) >= 2:
+        x = _safe_float(ref[0], np.nan)
+        y = _safe_float(ref[1], np.nan)
+        if np.isfinite(x) and np.isfinite(y):
+            return float(x), float(y)
+
+    bbox = obj.get("bbox_2d")
+    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        x1 = _safe_float(bbox[0], np.nan)
+        y1 = _safe_float(bbox[1], np.nan)
+        x2 = _safe_float(bbox[2], np.nan)
+        y2 = _safe_float(bbox[3], np.nan)
+        if np.isfinite(x1) and np.isfinite(y1) and np.isfinite(x2) and np.isfinite(y2):
+            return float((x1 + x2) * 0.5), float((y1 + y2) * 0.5)
+
+    return None, None
+
+
+def _extract_obj_speed(obj: dict) -> float | None:
+    if not isinstance(obj, dict):
+        return None
+
+    if "speed" in obj:
+        return abs(_safe_float(obj.get("speed"), 0.0))
+    if "speed_kmh" in obj:
+        return abs(_safe_float(obj.get("speed_kmh"), 0.0))
+
+    vx = _safe_float(obj.get("vx"), np.nan)
+    vy = _safe_float(obj.get("vy"), np.nan)
+    if np.isfinite(vx) and np.isfinite(vy):
+        return float((vx * vx + vy * vy) ** 0.5)
+    return None
+
+
+def _extract_obj_class(obj: dict) -> str:
+    raw = str((obj or {}).get("class", "")).strip().lower()
+    return _CLASS_ALIASES.get(raw, "other")
+
+
+def _congestion_score(density: float, avg_speed: float) -> float:
+    speed_ratio = max(0.0, min(1.0, avg_speed / 24.0))
+    speed_slowdown = 1.0 - speed_ratio
+    return max(0.0, min(1.0, 0.65 * density + 0.35 * speed_slowdown))
+
+
+def _congestion_level(density: float, avg_speed: float, score: float) -> str:
+    if density >= 0.8 and avg_speed <= 12.0:
+        return "HIGH"
+    if density >= 0.65 and avg_speed <= 7.0:
+        return "HIGH"
+    if score >= 0.68:
+        return "HIGH"
+    if score >= 0.38:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _risk_score(density: float, avg_speed: float, stopped_count: int, cluster_count: int) -> float:
+    speed_ratio = max(0.0, min(1.0, avg_speed / 24.0))
+    return max(
+        0.0,
+        min(
+            1.0,
+            0.58 * density
+            + 0.24 * (1.0 - speed_ratio)
+            + 0.10 * min(1.0, stopped_count / 4.0)
+            + 0.08 * min(1.0, cluster_count / 3.0),
+        ),
+    )
+
+
+def _infer_frame_shape(data: dict) -> tuple[int, int]:
+    meta = data.get("meta") or {}
+    candidates = [
+        (meta.get("height"), meta.get("width")),
+        (meta.get("frame_height"), meta.get("frame_width")),
+        (meta.get("h"), meta.get("w")),
+    ]
+    for h_raw, w_raw in candidates:
+        h = int(_safe_float(h_raw, 0))
+        w = int(_safe_float(w_raw, 0))
+        if h > 0 and w > 0:
+            return h, w
+
+    mp4_path = data.get("mp4_path", "")
+    if mp4_path and not os.path.isabs(mp4_path):
+        mp4_path = os.path.normpath(os.path.join(PROJECT_ROOT, mp4_path))
+    if mp4_path and os.path.exists(mp4_path):
+        cap = cv2.VideoCapture(mp4_path)
+        if cap.isOpened():
+            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            cap.release()
+            if h > 0 and w > 0:
+                return h, w
+
+    return 720, 1280
+
+
+def _top_zones_from_counts(zone_counts: dict, grid_size: int, limit: int = 8) -> list[dict]:
+    out = []
+    for (gx, gy), score in sorted(zone_counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]:
+        cx = int(gx * grid_size + grid_size * 0.5)
+        cy = int(gy * grid_size + grid_size * 0.5)
+        out.append(
+            {
+                "grid": [int(gx), int(gy)],
+                "center": [cx, cy],
+                "score": int(score),
+            }
+        )
+    return out
+
+
+def _build_improvement_plan(summary: dict, top_hotspots: list[dict], recommendations: list[str]) -> list[dict]:
+    high_ratio = float(summary.get("high_congestion_ratio", 0.0) or 0.0)
+    incident_ratio = float(summary.get("incident_frame_ratio", 0.0) or 0.0)
+    avg_speed = float(summary.get("avg_speed_kmh", 0.0) or 0.0)
+
+    plan = []
+
+    plan.append(
+        {
+            "title": "Adaptive Signal Split Optimization",
+            "priority": "High" if high_ratio >= 0.25 else "Medium",
+            "impact": "Reduce queue spillback and smooth phase transitions",
+            "expected_delay_reduction_pct": 18 if high_ratio >= 0.25 else 10,
+            "evidence": f"High-congestion share is {high_ratio * 100:.1f}% of sampled frames.",
+        }
+    )
+
+    if incident_ratio >= 0.15:
+        plan.append(
+            {
+                "title": "Conflict-Point Redesign",
+                "priority": "High",
+                "impact": "Reduce stopped-vehicle hotspots and improve safety margins",
+                "expected_delay_reduction_pct": 12,
+                "evidence": f"Incident activity detected in {incident_ratio * 100:.1f}% of frames.",
+            }
+        )
+
+    if avg_speed < 12.0:
+        plan.append(
+            {
+                "title": "Peak-Hour Turn Channelization",
+                "priority": "Medium",
+                "impact": "Increase discharge rate for dominant movement",
+                "expected_delay_reduction_pct": 9,
+                "evidence": f"Average corridor speed is low at {avg_speed:.1f} km/h.",
+            }
+        )
+
+    if top_hotspots:
+        h0 = top_hotspots[0].get("center", [0, 0])
+        plan.append(
+            {
+                "title": "Targeted Junction Micro-Intervention",
+                "priority": "Medium",
+                "impact": "Deploy lane marking and enforcement at dominant congestion cell",
+                "expected_delay_reduction_pct": 7,
+                "evidence": f"Primary hotspot detected near pixel ({h0[0]}, {h0[1]}).",
+            }
+        )
+
+    for rec in (recommendations or [])[:2]:
+        plan.append(
+            {
+                "title": "AI Recommendation",
+                "priority": "Advisory",
+                "impact": rec,
+                "expected_delay_reduction_pct": 5,
+                "evidence": "Generated from observed traffic states.",
+            }
+        )
+
+    return plan[:6]
+
+
 @router.get("/files")
 def list_files():
     files = []
@@ -627,6 +850,232 @@ def get_data(path: str = Query(...)):
         raise HTTPException(500, f"Failed to load: {e}")
 
 
+@router.get("/analytics")
+def get_analytics(
+    path: str = Query(...),
+    sample_step: int = Query(default=5, ge=1, le=240),
+):
+    full = _safe_out_path(path)
+    try:
+        data = _load_replay(full)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to load replay: {e}")
+
+    frames = data.get("frames", []) or []
+    if not frames:
+        return {
+            "path": path,
+            "location_code": data.get("location_code"),
+            "frame_shape": [720, 1280],
+            "summary": {},
+            "kpis": {},
+            "distributions": {},
+            "timeline": [],
+            "hotspots": {"density": [], "stopped": [], "clusters": []},
+            "recommendations": [],
+            "improvement_plan": [],
+            "report": {
+                "headline": "No replay frames available for analytics.",
+                "feedback": [],
+            },
+        }
+
+    frame_h, frame_w = _infer_frame_shape(data)
+    grid_size = max(36, int(min(frame_h, frame_w) / 14))
+
+    class_totals = {"car": 0, "bus": 0, "bike": 0, "truck": 0, "other": 0}
+    congestion_bins = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+
+    density_zone_counts = {}
+    stopped_zone_counts = {}
+    cluster_zone_counts = {}
+
+    vehicle_series = []
+    speed_series = []
+    density_series = []
+    congestion_series = []
+    risk_series = []
+
+    timeline = []
+    incident_frame_count = 0
+    peak_vehicle_count = 0
+
+    incident_detector = IncidentDetector() if IncidentDetector is not None else None
+
+    for i, frame in enumerate(frames):
+        frame_idx = int(frame.get("frame_index", i))
+        objects = frame.get("objects") or []
+        vehicle_count = len(objects)
+        peak_vehicle_count = max(peak_vehicle_count, vehicle_count)
+
+        speeds = []
+        for obj in objects:
+            speed = _extract_obj_speed(obj)
+            if speed is not None:
+                speeds.append(speed)
+
+            cls = _extract_obj_class(obj)
+            class_totals[cls] = class_totals.get(cls, 0) + 1
+
+            px, py = _extract_obj_point(obj)
+            if px is not None and py is not None:
+                gx = int(max(0, px) // grid_size)
+                gy = int(max(0, py) // grid_size)
+                density_zone_counts[(gx, gy)] = density_zone_counts.get((gx, gy), 0) + 1
+
+        avg_speed = float(np.mean(speeds)) if speeds else 0.0
+        density = min(1.0, vehicle_count / 80.0)
+        congestion_score = _congestion_score(density, avg_speed)
+        congestion_level = _congestion_level(density, avg_speed, congestion_score)
+        congestion_bins[congestion_level] += 1
+
+        stopped_count = 0
+        cluster_count = 0
+
+        if incident_detector is not None:
+            try:
+                incidents = incident_detector.process(objects)
+            except Exception:
+                incidents = {"stopped": [], "clusters": [], "stopped_points": []}
+
+            stopped_count = len(incidents.get("stopped", []))
+            cluster_count = len(incidents.get("clusters", []))
+
+            for pt in incidents.get("stopped_points", []):
+                x = _safe_float(pt.get("x"), -1)
+                y = _safe_float(pt.get("y"), -1)
+                if x >= 0 and y >= 0:
+                    gx = int(x // grid_size)
+                    gy = int(y // grid_size)
+                    stopped_zone_counts[(gx, gy)] = stopped_zone_counts.get((gx, gy), 0) + 1
+
+            for c in incidents.get("clusters", []):
+                if not isinstance(c, (list, tuple)) or len(c) < 2:
+                    continue
+                x = _safe_float(c[0], -1)
+                y = _safe_float(c[1], -1)
+                if x >= 0 and y >= 0:
+                    gx = int(x // grid_size)
+                    gy = int(y // grid_size)
+                    cluster_zone_counts[(gx, gy)] = cluster_zone_counts.get((gx, gy), 0) + 1
+
+        if stopped_count > 0 or cluster_count > 0:
+            incident_frame_count += 1
+
+        risk_score = _risk_score(density, avg_speed, stopped_count, cluster_count)
+
+        vehicle_series.append(float(vehicle_count))
+        speed_series.append(float(avg_speed))
+        density_series.append(float(density))
+        congestion_series.append(float(congestion_score))
+        risk_series.append(float(risk_score))
+
+        if (i % sample_step) == 0 or i == (len(frames) - 1):
+            timeline.append(
+                {
+                    "frame": int(frame_idx),
+                    "vehicle_count": int(vehicle_count),
+                    "avg_speed_kmh": round(avg_speed, 3),
+                    "density": round(density, 5),
+                    "congestion_score": round(congestion_score, 5),
+                    "risk_score": round(risk_score, 5),
+                    "congestion_level": congestion_level,
+                    "stopped_vehicles": int(stopped_count),
+                    "clusters": int(cluster_count),
+                }
+            )
+
+    avg_vehicle = float(np.mean(vehicle_series)) if vehicle_series else 0.0
+    avg_speed = float(np.mean(speed_series)) if speed_series else 0.0
+    avg_density = float(np.mean(density_series)) if density_series else 0.0
+    avg_risk = float(np.mean(risk_series)) if risk_series else 0.0
+    high_ratio = congestion_bins.get("HIGH", 0) / max(1, len(frames))
+    incident_ratio = incident_frame_count / max(1, len(frames))
+
+    top_density = _top_zones_from_counts(density_zone_counts, grid_size=grid_size, limit=10)
+    top_stopped = _top_zones_from_counts(stopped_zone_counts, grid_size=grid_size, limit=8)
+    top_clusters = _top_zones_from_counts(cluster_zone_counts, grid_size=grid_size, limit=8)
+
+    rec_input = {
+        "density_zones": [tuple(z.get("center", [0, 0])) for z in top_density[:6]],
+        "stopped_zones": [tuple(z.get("center", [0, 0])) for z in top_stopped[:6]],
+        "avg_speed": avg_speed,
+        "vehicle_count": int(round(avg_vehicle)),
+    }
+    recommendations = []
+    if generate_recommendations is not None:
+        try:
+            recommendations = generate_recommendations(rec_input)
+        except Exception:
+            recommendations = []
+
+    summary = {
+        "frames_total": int(len(frames)),
+        "frames_sampled": int(len(timeline)),
+        "avg_vehicle_count": round(avg_vehicle, 3),
+        "peak_vehicle_count": int(peak_vehicle_count),
+        "avg_speed_kmh": round(avg_speed, 3),
+        "avg_density": round(avg_density, 5),
+        "avg_risk_score": round(avg_risk, 5),
+        "high_congestion_ratio": round(high_ratio, 5),
+        "incident_frame_ratio": round(incident_ratio, 5),
+    }
+
+    speed_norm = max(0.0, min(1.0, avg_speed / 24.0))
+    stability = 1.0 - min(1.0, (float(np.std(vehicle_series)) / max(1.0, peak_vehicle_count)))
+    safety = 1.0 - min(1.0, high_ratio * 0.65 + incident_ratio * 0.75)
+    throughput = min(1.0, (avg_vehicle / max(1.0, peak_vehicle_count)) * (0.5 + 0.5 * speed_norm))
+    readiness = max(0.0, min(1.0, 0.35 * throughput + 0.35 * stability + 0.30 * safety))
+
+    kpis = {
+        "throughput_index": round(throughput * 100.0, 2),
+        "stability_index": round(stability * 100.0, 2),
+        "safety_index": round(safety * 100.0, 2),
+        "junction_readiness": round(readiness * 100.0, 2),
+    }
+
+    improvement_plan = _build_improvement_plan(summary, top_density, recommendations)
+
+    feedback = [
+        "Prioritize adaptive phase splits during peak demand windows.",
+        "Deploy targeted enforcement/markings near the top hotspot cells.",
+        "Monitor stopped-vehicle recurrence after each geometry/signal adjustment.",
+    ]
+    if avg_speed < 10.0:
+        feedback.append("Average speed is critically low; consider immediate signal retiming pilot.")
+    if high_ratio > 0.30:
+        feedback.append("High congestion persistence suggests potential approach-capacity deficit.")
+
+    return {
+        "path": path,
+        "location_code": data.get("location_code"),
+        "frame_shape": [int(frame_h), int(frame_w)],
+        "grid_size": int(grid_size),
+        "sample_step": int(sample_step),
+        "summary": summary,
+        "kpis": kpis,
+        "distributions": {
+            "class_totals": class_totals,
+            "congestion_bins": congestion_bins,
+        },
+        "timeline": timeline,
+        "hotspots": {
+            "density": top_density,
+            "stopped": top_stopped,
+            "clusters": top_clusters,
+        },
+        "recommendations": recommendations,
+        "improvement_plan": improvement_plan,
+        "report": {
+            "headline": "AI junction assessment complete: review congestion trends, incident hotspots, and optimization actions.",
+            "feedback": feedback,
+            "overlay_features_available": OVERLAY_FEATURES_AVAILABLE,
+        },
+    }
+
+
 @router.get("/stream")
 def stream_video_compat(
     path: str = Query(...),
@@ -635,6 +1084,9 @@ def stream_video_compat(
     show_label: bool = Query(default=True),
     show_tracking: bool = Query(default=True),
     show_roi: bool = Query(default=False),
+    show_heatmap: bool = Query(default=False),
+    show_incidents: bool = Query(default=False),
+    show_recommendations: bool = Query(default=False),
     start_frame: int = Query(default=0, ge=0),
 ):
     return stream_cctv(
@@ -644,6 +1096,9 @@ def stream_video_compat(
         show_label=show_label,
         show_tracking=show_tracking,
         show_roi=show_roi,
+        show_heatmap=show_heatmap,
+        show_incidents=show_incidents,
+        show_recommendations=show_recommendations,
         start_frame=start_frame,
     )
 
@@ -695,6 +1150,7 @@ def stream_cctv(
         if frame_idx > 0:
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
 
+        incident_detector = IncidentDetector() if IncidentDetector is not None else None
         delay = 1.0 / max(1, int(fps))
         while True:
             ret, frame = cap.read()
@@ -708,22 +1164,33 @@ def stream_cctv(
 
             # Apply traffic analysis overlays
             try:
-                if show_heatmap:
-                    density_map = generate_density_map(objects, frame.shape)
+                if show_heatmap and generate_density_map is not None and normalize_density_map is not None and draw_heatmap is not None:
+                    density_map = generate_density_map(frame.shape, objects)
                     normalized_map = normalize_density_map(density_map)
-                    draw_heatmap(frame, normalized_map)
-                
-                if show_incidents:
-                    incident_detector = IncidentDetector()
-                    detections = incident_detector.process(objects, frame)
-                    if detections:
-                        draw_incidents(frame, detections)
-                
-                if show_recommendations:
-                    recommendations = generate_recommendations(objects, frame.shape)
-                    draw_recommendations(frame, recommendations)
-            except Exception as e:
-                # Silently skip overlays if modules unavailable
+                    frame = draw_heatmap(frame, normalized_map)
+
+                detections = {"stopped": [], "clusters": [], "stopped_points": []}
+                if show_incidents and incident_detector is not None and draw_incidents is not None:
+                    detections = incident_detector.process(objects)
+                    frame = draw_incidents(frame, detections)
+
+                if show_recommendations and generate_recommendations is not None and draw_recommendations is not None:
+                    zone_clusters = detections.get("clusters", []) if isinstance(detections, dict) else []
+                    stopped_pts = detections.get("stopped_points", []) if isinstance(detections, dict) else []
+                    avg_speed = 0.0
+                    if objects:
+                        speeds = [s for s in (_extract_obj_speed(o) for o in objects) if s is not None]
+                        avg_speed = float(np.mean(speeds)) if speeds else 0.0
+
+                    insights = {
+                        "density_zones": zone_clusters,
+                        "stopped_zones": [(p.get("x", 0), p.get("y", 0)) for p in stopped_pts],
+                        "avg_speed": avg_speed,
+                        "vehicle_count": len(objects),
+                    }
+                    frame = draw_recommendations(frame, insights)
+            except Exception:
+                # Silently skip overlays if feature modules are unavailable.
                 pass
 
             cv2.putText(

@@ -2,6 +2,12 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { Line, Bar, Radar } from "react-chartjs-2";
 import {
+  DEFAULT_SAMPLE_STEP,
+  fetchDisasterManagement,
+  fetchVisualizationFiles,
+  prefetchAnalytics,
+} from "../utils/visualizationApi";
+import {
   BarElement, CategoryScale, Chart as ChartJS, Filler, Legend,
   LineElement, LinearScale, PointElement, RadialLinearScale, Tooltip,
 } from "chart.js";
@@ -12,6 +18,13 @@ const chartAxis = {
   ticks: { color: "rgba(200,216,240,0.78)", font: { size: 11 } },
   grid: { color: "rgba(99,102,241,0.08)" },
   border: { color: "rgba(99,102,241,0.2)" },
+};
+
+const smallOpts = {
+  responsive: true,
+  maintainAspectRatio: false,
+  plugins: { legend: { display: false } },
+  elements: { point: { radius: 2, hoverRadius: 4 } },
 };
 
 function statusBadge(s) {
@@ -43,26 +56,28 @@ export default function FloodDetection() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/visualization/files")
-      .then(r => r.json())
-      .then(d => { const l = Array.isArray(d) ? d : []; setFiles(l); if (!queryPath && l.length > 0 && !selectedPath) setSelectedPath(l[0].path); })
+    fetchVisualizationFiles()
+      .then(l => { setFiles(l); if (!queryPath && l.length > 0 && !selectedPath) setSelectedPath(l[0].path); })
       .catch(() => {});
   }, []);
 
   useEffect(() => { if (queryPath) setSelectedPath(queryPath); }, [queryPath]);
 
-  async function loadData(path = selectedPath) {
+  async function loadData(path = selectedPath, { force = false } = {}) {
     if (!path) return;
     setLoading(true); setError("");
     try {
-      const r = await fetch(`/api/visualization/disaster-management?path=${encodeURIComponent(path)}&sample_step=4`);
-      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || `HTTP ${r.status}`); }
-      setData(await r.json());
+      const d = await fetchDisasterManagement(path, { sampleStep: DEFAULT_SAMPLE_STEP, force });
+      setData(d);
     } catch (e) { setError(String(e?.message || e)); }
     finally { setLoading(false); }
   }
 
-  useEffect(() => { if (selectedPath) loadData(selectedPath); }, [selectedPath]);
+  useEffect(() => {
+    if (!selectedPath) return;
+    loadData(selectedPath);
+    prefetchAnalytics(selectedPath, { sampleStep: DEFAULT_SAMPLE_STEP });
+  }, [selectedPath]);
 
   const summary = data?.summary || {};
   const timeline = data?.timeline || [];
@@ -148,7 +163,7 @@ export default function FloodDetection() {
             {files.map(f => <option key={f.path} value={f.path}>{f.path}</option>)}
           </select>
         </div>
-        <button className="btn btn-primary" onClick={() => loadData(selectedPath)} disabled={!selectedPath || loading}>
+        <button className="btn btn-primary" onClick={() => loadData(selectedPath, { force: true })} disabled={!selectedPath || loading}>
           {loading ? "Scanning..." : "Analyze Flood Risk"}
         </button>
       </div>

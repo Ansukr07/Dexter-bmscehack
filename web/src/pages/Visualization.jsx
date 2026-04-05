@@ -128,6 +128,8 @@ export default function Visualization() {
   const [showHeatmap, setShowHeatmap] = useState(false);
   const [showIncidents, setShowIncidents] = useState(false);
   const [showRecommendations, setShowRecommendations] = useState(false);
+  const [showDisasterZones, setShowDisasterZones] = useState(false);
+  const [showPotholeAlerts, setShowPotholeAlerts] = useState(false);
 
   const cctvRef = useRef(null);
   const satRef = useRef(null);
@@ -243,6 +245,10 @@ export default function Visualization() {
         setShowIncidents((v) => !v);
       } else if (e.key === "0") {
         setShowRecommendations((v) => !v);
+      } else if (e.key.toLowerCase() === "d") {
+        setShowDisasterZones((v) => !v);
+      } else if (e.key.toLowerCase() === "p") {
+        setShowPotholeAlerts((v) => !v);
       }
     }
     window.addEventListener("keydown", onKeyDown);
@@ -294,6 +300,8 @@ export default function Visualization() {
       show_heatmap: String(showHeatmap),
       show_incidents: String(showIncidents),
       show_recommendations: String(showRecommendations),
+      show_disaster_zones: String(showDisasterZones),
+      show_pothole_alerts: String(showPotholeAlerts),
       start_frame: String(startFrame),
       nonce: String(streamNonce),
     });
@@ -309,6 +317,8 @@ export default function Visualization() {
     showHeatmap,
     showIncidents,
     showRecommendations,
+    showDisasterZones,
+    showPotholeAlerts,
     startFrame,
     streamNonce,
   ]);
@@ -676,6 +686,16 @@ export default function Visualization() {
                   checked={showRecommendations}
                   onChange={setShowRecommendations}
                 />
+                <BoolRow
+                  label="Disaster Zones (D)"
+                  checked={showDisasterZones}
+                  onChange={setShowDisasterZones}
+                />
+                <BoolRow
+                  label="Pothole Alerts (P)"
+                  checked={showPotholeAlerts}
+                  onChange={setShowPotholeAlerts}
+                />
               </div>
               <div
                 style={{
@@ -685,7 +705,8 @@ export default function Visualization() {
                 }}
               >
                 Real-time traffic analysis visualization with density mapping,
-                incident detection, and congestion recommendations.
+                incident detection, congestion recommendations, disaster zoning,
+                and pothole hazard alerts.
               </div>
             </div>
 
@@ -713,7 +734,7 @@ export default function Visualization() {
                   {verticalSplit ? "Horizontal" : "Vertical"}
                 </button>
               </div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+              <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                 <button
                   className="btn btn-primary btn-sm"
                   disabled={!analysisPath}

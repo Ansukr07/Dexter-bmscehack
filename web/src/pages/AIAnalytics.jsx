@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import * as tf from "@tensorflow/tfjs";
 import { Bar, Doughnut, Line, Radar } from "react-chartjs-2";
+import { buildDisasterInsights } from "../utils/disasterFromAnalytics";
 import {
   ArcElement,
   BarElement,
@@ -36,6 +37,12 @@ function clamp(value, lo, hi) {
 function riskBadge(score) {
   if (score >= 0.7) return "badge-error";
   if (score >= 0.4) return "badge-pending";
+  return "badge-success";
+}
+
+function statusBadge(status) {
+  if (status === "CRITICAL") return "badge-error";
+  if (status === "WATCH") return "badge-pending";
   return "badge-success";
 }
 
@@ -232,6 +239,7 @@ export default function AIAnalytics() {
   const hotspots = analytics?.hotspots || { density: [], stopped: [], clusters: [] };
   const recs = analytics?.recommendations || [];
   const feedback = analytics?.report?.feedback || [];
+  const disaster = useMemo(() => buildDisasterInsights(analytics), [analytics]);
 
   const labels = timeline.map((t) => String(t.frame));
 
@@ -374,6 +382,41 @@ export default function AIAnalytics() {
     ],
   };
 
+  const twinScenarios = disaster?.digital_twin?.scenarios || [];
+  const disasterScenarioData = {
+    labels: twinScenarios.map((s) => s.name),
+    datasets: [
+      {
+        label: "Resilience Index",
+        data: twinScenarios.map((s) => Number(s.resilience_index || 0)),
+        backgroundColor: "rgba(0,212,255,0.52)",
+        borderColor: "#00d4ff",
+        borderWidth: 1,
+      },
+      {
+        label: "ETA Gain Projection %",
+        data: twinScenarios.map((s) => Number(s.eta_gain_projection_pct || 0)),
+        backgroundColor: "rgba(0,255,136,0.45)",
+        borderColor: "#00ff88",
+        borderWidth: 1,
+      },
+    ],
+  };
+
+  const disasterRiskProjectionData = {
+    labels: (disaster?.digital_twin?.projected_risk_timeline || []).map((_, i) => `T+${i + 1}`),
+    datasets: [
+      {
+        label: "Projected Risk",
+        data: disaster?.digital_twin?.projected_risk_timeline || [],
+        borderColor: "#ff4060",
+        backgroundColor: "rgba(255,64,96,0.25)",
+        fill: true,
+        tension: 0.24,
+      },
+    ],
+  };
+
   return (
     <>
       <div className="page-header">
@@ -388,7 +431,7 @@ export default function AIAnalytics() {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "minmax(260px, 2fr) repeat(3, auto)",
+              gridTemplateColumns: "minmax(260px, 2fr) repeat(4, auto)",
               gap: 10,
               alignItems: "end",
             }}
@@ -607,6 +650,88 @@ export default function AIAnalytics() {
               TensorFlow forecasting, hotspot extraction, and actionable improvement planning to support
               data-driven junction redesign decisions.
             </div>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-title">Integrated Disaster Management Layer</div>
+          <div className="stat-row" style={{ marginBottom: 12 }}>
+            <div className="stat-card">
+              <div className="stat-label">Disaster Index</div>
+              <div className="stat-value">{Number(disaster?.disaster_index || 0).toFixed(1)}</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">System Status</div>
+              <div style={{ marginTop: 6 }} className={`badge ${statusBadge(disaster?.status)}`}>
+                <span className="badge-dot" />
+                {disaster?.status || "STABLE"}
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">High Risk Zones</div>
+              <div className="stat-value">{Number(disaster?.zone_summary?.HIGH || 0)}</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">Reroute Paths</div>
+              <div className="stat-value">{(disaster?.rerouting_plan || []).length}</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">Pothole Predictions</div>
+              <div className="stat-value">{(disaster?.pothole_model?.prediction_zones || []).length}</div>
+            </div>
+          </div>
+
+          <div className="panel-grid panel-grid-2">
+            <div className="card" style={{ minHeight: 300 }}>
+              <div className="card-title">Rerouting and Pothole Priorities</div>
+              <div className="log-terminal" style={{ maxHeight: 230, marginBottom: 10 }}>
+                {(disaster?.rerouting_plan || []).length === 0 ? (
+                  <div className="text-muted">No urgent reroutes required for current run.</div>
+                ) : (
+                  (disaster?.rerouting_plan || []).map((r) => (
+                    <div key={r.route_id}>
+                      {r.route_id} | {r.priority} | {r.source_zone} -&gt; {r.target_zone} | ETA +{Number(r.eta_gain_pct || 0).toFixed(1)}%
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="json-viewer" style={{ maxHeight: 170 }}>
+{JSON.stringify((disaster?.pothole_model?.prediction_zones || []).slice(0, 8), null, 2)}
+              </div>
+            </div>
+
+            <div className="card" style={{ minHeight: 300 }}>
+              <div className="card-title">Digital Twin Scenarios</div>
+              <div style={{ height: 210, marginBottom: 10 }}>
+                <Bar
+                  data={disasterScenarioData}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { labels: { color: "rgba(220,240,255,0.92)" } } },
+                    scales: { x: chartAxis, y: chartAxis },
+                  }}
+                />
+              </div>
+              <div className="log-terminal" style={{ maxHeight: 90 }}>
+                {(disaster?.playbook || []).map((line, idx) => (
+                  <div key={`${idx}-${line}`}>• {line}</div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginTop: 12, minHeight: 240 }}>
+            <div className="card-title">Projected Risk Under Best Twin Strategy</div>
+            {(disaster?.digital_twin?.projected_risk_timeline || []).length === 0 ? (
+              <div className="alert alert-info" style={{ marginBottom: 0 }}>
+                Risk projection is not available for this replay sample.
+              </div>
+            ) : (
+              <div style={{ height: 180 }}>
+                <Line data={disasterRiskProjectionData} options={smallLineOptions} />
+              </div>
+            )}
           </div>
         </div>
       </div>

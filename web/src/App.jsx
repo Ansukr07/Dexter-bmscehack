@@ -55,6 +55,7 @@ export default function App() {
           <Route path="/visualization" element={<Visualization />} />
           <Route path="/ai-analytics" element={<AIAnalytics />} />
           <Route path="/junction-report" element={<JunctionReport />} />
+          <Route path="/disaster-management" element={<AIAnalytics />} />
         </Routes>
       </main>
     </div>

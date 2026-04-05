@@ -798,3 +798,43 @@ input[type="checkbox"] {
 .truncate    { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .section-gap { margin-bottom: 24px; }
+
+/* ─── Disaster Twin ─────────────────────────────────────────── */
+
+.twin-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.twin-cell {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  min-height: 104px;
+  transition: var(--transition);
+}
+
+.twin-cell:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.25);
+}
+
+@media (max-width: 1180px) {
+  .panel-grid-2,
+  .panel-grid-3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 860px) {
+  .twin-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .page-header { padding: 20px 18px 14px; }
+  .page-body { padding: 18px; }
+  .twin-grid { grid-template-columns: 1fr; }
+}

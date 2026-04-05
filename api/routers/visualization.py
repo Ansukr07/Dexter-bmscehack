@@ -24,6 +24,8 @@ IncidentDetector = None
 draw_incidents = None
 generate_recommendations = None
 draw_recommendations = None
+simulate_metrics = None
+detect_congestion_metric = None
 
 OVERLAY_FEATURES_AVAILABLE = False
 
@@ -35,6 +37,16 @@ try:
     OVERLAY_FEATURES_AVAILABLE = True
 except ImportError:
     OVERLAY_FEATURES_AVAILABLE = False
+
+try:
+    from modules.simulation import simulate_metrics
+except ImportError:
+    simulate_metrics = None
+
+try:
+    from modules.metrics import detect_congestion as detect_congestion_metric
+except ImportError:
+    detect_congestion_metric = None
 
 router = APIRouter()
 
@@ -490,6 +502,124 @@ def _draw_cctv_objects(frame: np.ndarray, objects: list, show_tracking: bool, sh
                     cv2.line(frame, pts[i], pts[i + 4], bgr, 1)
 
 
+def _draw_disaster_overlays(
+    frame: np.ndarray,
+    objects: list,
+    detections: dict | None,
+    *,
+    show_disaster_zones: bool,
+    show_pothole_alerts: bool,
+) -> np.ndarray:
+    if frame is None:
+        return frame
+
+    h, w = frame.shape[:2]
+    zones = {(r, c): {"count": 0, "incidents": 0, "potholes": 0} for r in range(3) for c in range(3)}
+
+    for obj in objects or []:
+        x, y = _extract_obj_point(obj)
+        if x is None or y is None:
+            continue
+        key = _zone_key_from_xy(x, y, w, h)
+        zones[key]["count"] += 1
+
+        cls_raw = _normalize_obj_class((obj or {}).get("class"))
+        if _is_pothole_label(cls_raw):
+            zones[key]["potholes"] += 1
+            if show_pothole_alerts:
+                bbox = obj.get("bbox_2d")
+                if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+                    x1, y1, x2, y2 = [int(_safe_float(v, 0)) for v in bbox[:4]]
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    cv2.putText(
+                        frame,
+                        "POTHOLE",
+                        (x1, max(14, y1 - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.48,
+                        (0, 0, 255),
+                        2,
+                        lineType=cv2.LINE_AA,
+                    )
+                else:
+                    cv2.circle(frame, (int(x), int(y)), 14, (0, 0, 255), 2, lineType=cv2.LINE_AA)
+
+    if isinstance(detections, dict):
+        for pt in detections.get("stopped_points", []):
+            x = _safe_float(pt.get("x"), np.nan)
+            y = _safe_float(pt.get("y"), np.nan)
+            if np.isfinite(x) and np.isfinite(y):
+                key = _zone_key_from_xy(x, y, w, h)
+                zones[key]["incidents"] += 1
+
+        for cluster in detections.get("clusters", []):
+            if not isinstance(cluster, (list, tuple)) or len(cluster) < 2:
+                continue
+            x = _safe_float(cluster[0], np.nan)
+            y = _safe_float(cluster[1], np.nan)
+            if np.isfinite(x) and np.isfinite(y):
+                key = _zone_key_from_xy(x, y, w, h)
+                zones[key]["incidents"] += 1
+
+    if not show_disaster_zones:
+        return frame
+
+    ranked = []
+    for key, info in zones.items():
+        density_term = min(1.0, float(info["count"]) / 10.0)
+        incident_term = min(1.0, float(info["incidents"]) / 3.0)
+        pothole_term = min(1.0, float(info["potholes"]) / 2.0)
+        risk = max(0.0, min(1.0, 0.55 * density_term + 0.30 * incident_term + 0.15 * pothole_term))
+        if risk > 0.05:
+            ranked.append((risk, key, info))
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+
+    for risk, key, info in ranked[:4]:
+        row, col = key
+        x1 = int(round((col / 3.0) * w))
+        y1 = int(round((row / 3.0) * h))
+        x2 = int(round(((col + 1) / 3.0) * w)) - 1
+        y2 = int(round(((row + 1) / 3.0) * h)) - 1
+
+        if risk >= 0.68:
+            sev = "HIGH"
+            color = (0, 0, 255)
+        elif risk >= 0.38:
+            sev = "MEDIUM"
+            color = (0, 180, 255)
+        else:
+            sev = "LOW"
+            color = (0, 210, 0)
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        label = f"{_zone_name(row, col)} {sev} R={risk:.2f}"
+        cv2.putText(
+            frame,
+            label,
+            (x1 + 6, min(y2 - 8, y1 + 20)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            color,
+            1,
+            lineType=cv2.LINE_AA,
+        )
+
+        if info["potholes"] > 0:
+            cv2.putText(
+                frame,
+                f"P:{int(info['potholes'])}",
+                (x1 + 6, min(y2 - 24, y1 + 40)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.43,
+                (0, 0, 255),
+                1,
+                lineType=cv2.LINE_AA,
+            )
+
+    return frame
+
+
 def _draw_sat_objects(
     frame: np.ndarray,
     objects: list,
@@ -601,6 +731,78 @@ _CLASS_ALIASES = {
     "truck": "truck",
     "lorry": "truck",
 }
+
+_POTHOLE_CLASS_TOKENS = (
+    "pothole",
+    "road_hole",
+    "roadhole",
+    "sinkhole",
+    "road_damage",
+    "road-damage",
+    "roadcrack",
+    "road_crack",
+    "crack",
+)
+_ACCIDENT_CLASS_TOKENS = (
+    "accident",
+    "crash",
+    "collision",
+    "incident",
+)
+_ZONE_ROWS = ("North", "Central", "South")
+_ZONE_COLS = ("West", "Center", "East")
+
+
+def _normalize_obj_class(raw_value) -> str:
+    return str(raw_value or "").strip().lower().replace(" ", "_")
+
+
+def _is_pothole_label(label: str) -> bool:
+    normalized = _normalize_obj_class(label)
+    if not normalized:
+        return False
+    return any(token in normalized for token in _POTHOLE_CLASS_TOKENS)
+
+
+def _is_accident_label(label: str) -> bool:
+    normalized = _normalize_obj_class(label)
+    if not normalized:
+        return False
+    return any(token in normalized for token in _ACCIDENT_CLASS_TOKENS)
+
+
+def _zone_key_from_xy(x: float, y: float, frame_w: int, frame_h: int) -> tuple[int, int]:
+    fw = max(1.0, float(frame_w))
+    fh = max(1.0, float(frame_h))
+    col = int(max(0, min(2, math.floor((float(x) / fw) * 3.0))))
+    row = int(max(0, min(2, math.floor((float(y) / fh) * 3.0))))
+    return row, col
+
+
+def _zone_name(row: int, col: int) -> str:
+    return f"{_ZONE_ROWS[int(row)]}-{_ZONE_COLS[int(col)]}"
+
+
+def _zone_id(row: int, col: int) -> str:
+    return f"z{int(row)}{int(col)}"
+
+
+def _zone_center(row: int, col: int, frame_w: int, frame_h: int) -> list[int]:
+    w_step = max(1.0, float(frame_w) / 3.0)
+    h_step = max(1.0, float(frame_h) / 3.0)
+    cx = int(round((col + 0.5) * w_step))
+    cy = int(round((row + 0.5) * h_step))
+    return [cx, cy]
+
+
+def _zone_neighbors(row: int, col: int) -> list[str]:
+    out = []
+    for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        rr = int(row) + dr
+        cc = int(col) + dc
+        if 0 <= rr <= 2 and 0 <= cc <= 2:
+            out.append(_zone_id(rr, cc))
+    return out
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -800,6 +1002,300 @@ def _build_improvement_plan(summary: dict, top_hotspots: list[dict], recommendat
         )
 
     return plan[:6]
+
+
+def _init_disaster_zones(frame_h: int, frame_w: int) -> dict[tuple[int, int], dict]:
+    zones = {}
+    for row in range(3):
+        for col in range(3):
+            zones[(row, col)] = {
+                "zone_id": _zone_id(row, col),
+                "zone_label": _zone_name(row, col),
+                "row": row,
+                "col": col,
+                "center": _zone_center(row, col, frame_w, frame_h),
+                "vehicle_points": 0,
+                "speed_sum": 0.0,
+                "speed_count": 0,
+                "incident_events": 0,
+                "stopped_events": 0,
+                "cluster_events": 0,
+                "accident_events": 0,
+                "pothole_hits": 0,
+                "frames_active": 0,
+            }
+    return zones
+
+
+def _zone_severity(risk_score: float, pothole_probability: float) -> str:
+    if risk_score >= 0.66 or pothole_probability >= 0.72:
+        return "HIGH"
+    if risk_score >= 0.38 or pothole_probability >= 0.45:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _build_rerouting_plan(zone_rows: list[dict]) -> list[dict]:
+    if not zone_rows:
+        return []
+
+    high_zones = [z for z in zone_rows if z.get("severity") == "HIGH"]
+    medium_zones = [z for z in zone_rows if z.get("severity") == "MEDIUM"]
+    low_zones = [z for z in zone_rows if z.get("severity") == "LOW"]
+
+    target_pool = sorted(low_zones + medium_zones, key=lambda z: (z.get("risk_score", 1.0), -z.get("avg_speed_kmh", 0.0)))
+
+    reroutes = []
+    for idx, src in enumerate(high_zones[:5]):
+        src_id = str(src.get("zone_id"))
+        neighbor_ids = set(_zone_neighbors(int(src.get("row", 0)), int(src.get("col", 0))))
+        target = next((z for z in target_pool if z.get("zone_id") in neighbor_ids and z.get("zone_id") != src_id), None)
+        if target is None:
+            target = next((z for z in target_pool if z.get("zone_id") != src_id), None)
+        if target is None:
+            continue
+
+        src_risk = float(src.get("risk_score", 0.0) or 0.0)
+        dst_risk = float(target.get("risk_score", 0.0) or 0.0)
+        src_pothole = float(src.get("pothole_probability", 0.0) or 0.0)
+        dst_pothole = float(target.get("pothole_probability", 0.0) or 0.0)
+        eta_gain = max(5.0, min(42.0, round(8.0 + max(0.0, src_risk - dst_risk) * 46.0 + max(0.0, src_pothole - dst_pothole) * 18.0, 2)))
+
+        reroutes.append(
+            {
+                "route_id": f"RR-{idx + 1:02d}",
+                "priority": "Immediate" if src_risk >= 0.78 else "Urgent",
+                "source_zone": src.get("zone_label"),
+                "source_zone_id": src_id,
+                "target_zone": target.get("zone_label"),
+                "target_zone_id": target.get("zone_id"),
+                "eta_gain_pct": eta_gain,
+                "reason": "High collision/pothole exposure and recurring stoppage",
+                "signal_directive": "Increase green split by 8-12% and prioritize emergency clearance",
+            }
+        )
+
+    if not reroutes and medium_zones and low_zones:
+        src = medium_zones[0]
+        dst = low_zones[0]
+        reroutes.append(
+            {
+                "route_id": "RR-01",
+                "priority": "Prepared",
+                "source_zone": src.get("zone_label"),
+                "source_zone_id": src.get("zone_id"),
+                "target_zone": dst.get("zone_label"),
+                "target_zone_id": dst.get("zone_id"),
+                "eta_gain_pct": 9.5,
+                "reason": "Pre-emptive balancing of medium-risk inflow",
+                "signal_directive": "Enable standby reroute plan and queue metering",
+            }
+        )
+
+    return reroutes[:6]
+
+
+def _build_digital_twin_scenarios(summary: dict, zone_rows: list[dict], rerouting_plan: list[dict]) -> dict:
+    avg_density = max(0.0, min(1.0, float(summary.get("avg_density", 0.0) or 0.0)))
+    avg_speed = max(0.0, float(summary.get("avg_speed_kmh", 0.0) or 0.0))
+    avg_vehicle = max(0.0, float(summary.get("avg_vehicle_count", 0.0) or 0.0))
+    avg_risk = max(0.0, min(1.0, float(summary.get("avg_risk_score", 0.0) or 0.0)))
+    incident_ratio = max(0.0, min(1.0, float(summary.get("incident_frame_ratio", 0.0) or 0.0)))
+
+    zone_count = max(1, len(zone_rows))
+    high_zone_share = len([z for z in zone_rows if z.get("severity") == "HIGH"]) / zone_count
+    avg_pothole_probability = float(np.mean([float(z.get("pothole_probability", 0.0) or 0.0) for z in zone_rows])) if zone_rows else 0.0
+
+    congestion_before = _congestion_level(avg_density, avg_speed, _congestion_score(avg_density, avg_speed))
+    baseline = {
+        "density": round(avg_density, 5),
+        "avg_speed_kmh": round(avg_speed, 3),
+        "vehicle_count": int(round(avg_vehicle)),
+        "risk_score": round(avg_risk, 5),
+        "incident_ratio": round(incident_ratio, 5),
+        "congestion_state": congestion_before,
+    }
+
+    scenario_templates = [
+        {
+            "id": "adaptive_signal_priority",
+            "name": "Adaptive Signal Priority",
+            "sim_action": "increase_green",
+            "density_mult": 0.88,
+            "speed_mult": 1.12,
+            "risk_mult": 0.80,
+            "incident_mult": 0.83,
+            "pothole_mult": 0.96,
+            "high_zone_penalty": 0.05,
+            "play": "Signal retiming + emergency green corridor",
+        },
+        {
+            "id": "controlled_emergency_reroute",
+            "name": "Controlled Emergency Reroute",
+            "sim_action": "reduce_flow",
+            "density_mult": 0.84,
+            "speed_mult": 1.08,
+            "risk_mult": 0.78,
+            "incident_mult": 0.86,
+            "pothole_mult": 0.90,
+            "high_zone_penalty": 0.03,
+            "play": "Divert inflow from high-risk sectors and meter entry",
+        },
+        {
+            "id": "rapid_pothole_response",
+            "name": "Rapid Pothole Response",
+            "sim_action": None,
+            "density_mult": 0.92,
+            "speed_mult": 1.11,
+            "risk_mult": 0.74,
+            "incident_mult": 0.90,
+            "pothole_mult": 0.56,
+            "high_zone_penalty": 0.02,
+            "play": "Immediate micro-repair and lane shielding around pothole clusters",
+        },
+    ]
+
+    scenarios = []
+    for tpl in scenario_templates:
+        sim_density = avg_density
+        sim_speed = avg_speed
+        sim_vehicle = int(round(avg_vehicle))
+
+        if simulate_metrics is not None and tpl.get("sim_action"):
+            try:
+                sim = simulate_metrics(
+                    {
+                        "density": avg_density,
+                        "avg_speed": avg_speed,
+                        "vehicle_count": sim_vehicle,
+                    },
+                    str(tpl["sim_action"]),
+                )
+                sim_density = float(sim.get("density", sim_density) or sim_density)
+                sim_speed = float(sim.get("avg_speed", sim_speed) or sim_speed)
+                sim_vehicle = int(round(float(sim.get("vehicle_count", sim_vehicle) or sim_vehicle)))
+            except Exception:
+                pass
+
+        sim_density = max(0.0, min(1.0, sim_density * float(tpl["density_mult"])))
+        sim_speed = max(0.0, sim_speed * float(tpl["speed_mult"]))
+        sim_vehicle = max(0, int(round(sim_vehicle * (0.98 if tpl["id"] != "controlled_emergency_reroute" else 0.92))))
+
+        risk_after = max(0.0, min(1.0, avg_risk * float(tpl["risk_mult"]) + high_zone_share * float(tpl["high_zone_penalty"])))
+        incident_after = max(0.0, min(1.0, incident_ratio * float(tpl["incident_mult"])))
+        pothole_after = max(0.0, min(1.0, avg_pothole_probability * float(tpl["pothole_mult"])))
+
+        if detect_congestion_metric is not None:
+            try:
+                congestion_after = str(
+                    detect_congestion_metric(
+                        {
+                            "density": sim_density,
+                            "avg_speed": sim_speed,
+                            "vehicle_count": sim_vehicle,
+                        }
+                    )
+                ).upper()
+            except Exception:
+                congestion_after = _congestion_level(sim_density, sim_speed, _congestion_score(sim_density, sim_speed))
+        else:
+            congestion_after = _congestion_level(sim_density, sim_speed, _congestion_score(sim_density, sim_speed))
+
+        reroute_bonus = min(0.12, len(rerouting_plan) * 0.02)
+        resilience_index = max(
+            0.0,
+            min(
+                100.0,
+                100.0
+                * (
+                    1.0
+                    - (
+                        0.43 * risk_after
+                        + 0.30 * sim_density
+                        + 0.17 * incident_after
+                        + 0.10 * pothole_after
+                        - reroute_bonus
+                    )
+                ),
+            ),
+        )
+
+        scenarios.append(
+            {
+                "id": tpl["id"],
+                "name": tpl["name"],
+                "operational_play": tpl["play"],
+                "congestion_before": congestion_before,
+                "congestion_after": congestion_after,
+                "metrics_after": {
+                    "density": round(sim_density, 5),
+                    "avg_speed_kmh": round(sim_speed, 3),
+                    "vehicle_count": int(sim_vehicle),
+                    "risk_score": round(risk_after, 5),
+                    "incident_ratio": round(incident_after, 5),
+                    "pothole_probability": round(pothole_after, 5),
+                },
+                "eta_gain_projection_pct": round(min(45.0, 8.0 + resilience_index * 0.18), 2),
+                "resilience_index": round(resilience_index, 2),
+                "resource_load": "High" if tpl["id"] == "rapid_pothole_response" else "Medium",
+            }
+        )
+
+    scenarios.sort(key=lambda s: float(s.get("resilience_index", 0.0)), reverse=True)
+    best = scenarios[0] if scenarios else None
+
+    projected_risk_timeline = []
+    if best is not None:
+        target_risk = float(best.get("metrics_after", {}).get("risk_score", avg_risk) or avg_risk)
+        for step in range(1, 9):
+            blend = step / 8.0
+            projected = max(0.0, min(1.0, (1.0 - blend) * avg_risk + blend * target_risk))
+            projected_risk_timeline.append(round(projected, 5))
+
+    return {
+        "baseline": baseline,
+        "scenarios": scenarios,
+        "best_scenario": best,
+        "projected_risk_timeline": projected_risk_timeline,
+    }
+
+
+def _build_disaster_playbook(summary: dict, rerouting_plan: list[dict], pothole_predictions: list[dict], digital_twin: dict) -> list[str]:
+    high_ratio = float(summary.get("high_congestion_ratio", 0.0) or 0.0)
+    incident_ratio = float(summary.get("incident_frame_ratio", 0.0) or 0.0)
+    avg_speed = float(summary.get("avg_speed_kmh", 0.0) or 0.0)
+
+    playbook = [
+        "Activate incident command dashboard and lock high-risk monitoring feeds.",
+        "Dispatch field teams to top two HIGH severity sectors within the first 12 minutes.",
+    ]
+
+    if rerouting_plan:
+        first = rerouting_plan[0]
+        playbook.append(
+            f"Enable reroute {first.get('route_id')} from {first.get('source_zone')} to {first.get('target_zone')} immediately."
+        )
+
+    if pothole_predictions:
+        top = pothole_predictions[0]
+        playbook.append(
+            f"Initiate rapid pothole patch cycle at {top.get('zone_label')} (probability {float(top.get('pothole_probability', 0.0)) * 100:.1f}%)."
+        )
+
+    if incident_ratio >= 0.18:
+        playbook.append("Escalate to police/manual override for conflict-point protection in recurring incident windows.")
+    if high_ratio >= 0.25:
+        playbook.append("Apply peak-hour emergency phase plan with queue-gating at upstream approaches.")
+    if avg_speed < 10.0:
+        playbook.append("Deploy dynamic message signage to offload incoming demand from congested approaches.")
+
+    best = (digital_twin or {}).get("best_scenario") or {}
+    if best:
+        playbook.append(
+            f"Primary digital twin strategy: {best.get('name')} (resilience index {float(best.get('resilience_index', 0.0)):.1f})."
+        )
+
+    return playbook[:8]
 
 
 @router.get("/files")
@@ -1076,6 +1572,312 @@ def get_analytics(
     }
 
 
+@router.get("/disaster-management")
+def get_disaster_management(
+    path: str = Query(...),
+    sample_step: int = Query(default=5, ge=1, le=240),
+):
+    analytics = get_analytics(path=path, sample_step=sample_step)
+
+    full = _safe_out_path(path)
+    try:
+        data = _load_replay(full)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to load replay: {e}")
+
+    frames = data.get("frames", []) or []
+    frame_h, frame_w = _infer_frame_shape(data)
+    summary = analytics.get("summary", {}) or {}
+
+    if not frames:
+        return {
+            "path": path,
+            "location_code": data.get("location_code"),
+            "sample_step": int(sample_step),
+            "summary": summary,
+            "kpis": analytics.get("kpis", {}),
+            "zone_summary": {"HIGH": 0, "MEDIUM": 0, "LOW": 0},
+            "risk_zones": {"HIGH": [], "MEDIUM": [], "LOW": []},
+            "rerouting_plan": [],
+            "pothole_model": {
+                "model": {
+                    "name": "Heuristic Pothole Risk Model v1",
+                    "features": ["detected pothole labels", "incident density", "speed slowdown"],
+                },
+                "detected_classes": {},
+                "prediction_zones": [],
+                "event_samples": [],
+            },
+            "digital_twin": _build_digital_twin_scenarios(summary, [], []),
+            "playbook": [],
+            "timeline": analytics.get("timeline", []),
+            "hotspots": analytics.get("hotspots", {}),
+            "recommendations": analytics.get("recommendations", []),
+            "improvement_plan": analytics.get("improvement_plan", []),
+            "disaster_index": 0.0,
+            "report": {
+                "status": "NO_DATA",
+                "headline": "No replay frames available for disaster-management analytics.",
+            },
+        }
+
+    zones = _init_disaster_zones(frame_h, frame_w)
+    pothole_class_counts = {}
+    pothole_event_samples = []
+
+    incident_detector = IncidentDetector() if IncidentDetector is not None else None
+    total_frames = max(1, len(frames))
+
+    for frame_idx_raw, frame in enumerate(frames):
+        frame_idx = int(frame.get("frame_index", frame_idx_raw))
+        objects = frame.get("objects") or []
+        active_zones = set()
+
+        detections = {"stopped": [], "clusters": [], "stopped_points": []}
+        if incident_detector is not None:
+            try:
+                detections = incident_detector.process(objects)
+            except Exception:
+                detections = {"stopped": [], "clusters": [], "stopped_points": []}
+
+        for obj in objects:
+            x, y = _extract_obj_point(obj)
+            if x is None or y is None:
+                continue
+
+            key = _zone_key_from_xy(x, y, frame_w, frame_h)
+            zone = zones[key]
+            active_zones.add(key)
+            zone["vehicle_points"] += 1
+
+            speed = _extract_obj_speed(obj)
+            if speed is not None:
+                zone["speed_sum"] += float(speed)
+                zone["speed_count"] += 1
+
+            cls_raw = _normalize_obj_class((obj or {}).get("class"))
+            if _is_accident_label(cls_raw):
+                zone["accident_events"] += 1
+
+            if _is_pothole_label(cls_raw):
+                zone["pothole_hits"] += 1
+                pothole_class_counts[cls_raw] = pothole_class_counts.get(cls_raw, 0) + 1
+
+                if len(pothole_event_samples) < 120:
+                    conf = _safe_float(obj.get("confidence"), _safe_float(obj.get("score"), 0.55))
+                    pothole_event_samples.append(
+                        {
+                            "frame": int(frame_idx),
+                            "zone_id": zone["zone_id"],
+                            "zone_label": zone["zone_label"],
+                            "center": [int(round(x)), int(round(y))],
+                            "label": cls_raw,
+                            "confidence": round(max(0.05, min(0.99, conf)), 3),
+                        }
+                    )
+
+        for pt in detections.get("stopped_points", []):
+            x = _safe_float(pt.get("x"), np.nan)
+            y = _safe_float(pt.get("y"), np.nan)
+            if np.isfinite(x) and np.isfinite(y):
+                key = _zone_key_from_xy(x, y, frame_w, frame_h)
+                zone = zones[key]
+                active_zones.add(key)
+                zone["incident_events"] += 1
+                zone["stopped_events"] += 1
+
+        for cluster in detections.get("clusters", []):
+            if not isinstance(cluster, (list, tuple)) or len(cluster) < 2:
+                continue
+            x = _safe_float(cluster[0], np.nan)
+            y = _safe_float(cluster[1], np.nan)
+            if np.isfinite(x) and np.isfinite(y):
+                key = _zone_key_from_xy(x, y, frame_w, frame_h)
+                zone = zones[key]
+                active_zones.add(key)
+                zone["incident_events"] += 1
+                zone["cluster_events"] += 1
+
+        for key in active_zones:
+            zones[key]["frames_active"] += 1
+
+    zone_rows = []
+    for _, zone in zones.items():
+        avg_speed = (
+            float(zone["speed_sum"]) / max(1, int(zone["speed_count"]))
+            if int(zone["speed_count"]) > 0
+            else float(summary.get("avg_speed_kmh", 0.0) or 0.0)
+        )
+        occupancy = min(1.0, float(zone["vehicle_points"]) / (total_frames * 14.0))
+        incident_rate = min(1.0, float(zone["incident_events"]) / (total_frames * 1.5))
+        accident_rate = min(1.0, float(zone["accident_events"]) / (total_frames * 0.6))
+        pothole_density = min(1.0, float(zone["pothole_hits"]) / (total_frames * 0.08 + 1.0))
+        speed_penalty = 1.0 - max(0.0, min(1.0, avg_speed / 24.0))
+
+        pothole_probability = max(
+            0.0,
+            min(
+                1.0,
+                0.50 * pothole_density
+                + 0.22 * incident_rate
+                + 0.18 * accident_rate
+                + 0.10 * speed_penalty,
+            ),
+        )
+        risk_score = max(
+            0.0,
+            min(
+                1.0,
+                0.40 * occupancy
+                + 0.24 * incident_rate
+                + 0.16 * accident_rate
+                + 0.20 * pothole_probability,
+            ),
+        )
+        severity = _zone_severity(risk_score, pothole_probability)
+
+        zone_rows.append(
+            {
+                "zone_id": zone["zone_id"],
+                "zone_label": zone["zone_label"],
+                "row": int(zone["row"]),
+                "col": int(zone["col"]),
+                "center": zone["center"],
+                "severity": severity,
+                "risk_score": round(risk_score, 5),
+                "pothole_probability": round(pothole_probability, 5),
+                "avg_speed_kmh": round(avg_speed, 3),
+                "incident_rate": round(incident_rate, 5),
+                "vehicle_activity": int(zone["vehicle_points"]),
+                "pothole_hits": int(zone["pothole_hits"]),
+                "accident_events": int(zone["accident_events"]),
+                "stopped_events": int(zone["stopped_events"]),
+                "cluster_events": int(zone["cluster_events"]),
+            }
+        )
+
+    zone_rows.sort(key=lambda z: float(z.get("risk_score", 0.0)), reverse=True)
+    risk_zones = {
+        "HIGH": [z for z in zone_rows if z.get("severity") == "HIGH"],
+        "MEDIUM": [z for z in zone_rows if z.get("severity") == "MEDIUM"],
+        "LOW": [z for z in zone_rows if z.get("severity") == "LOW"],
+    }
+    zone_summary = {k: len(v) for k, v in risk_zones.items()}
+
+    rerouting_plan = _build_rerouting_plan(zone_rows)
+
+    pothole_predictions = []
+    for zone in zone_rows:
+        p_prob = float(zone.get("pothole_probability", 0.0) or 0.0)
+        if p_prob < 0.22 and int(zone.get("pothole_hits", 0)) == 0:
+            continue
+        if p_prob >= 0.72:
+            priority = "Critical"
+            repair_window_hours = 6
+        elif p_prob >= 0.50:
+            priority = "High"
+            repair_window_hours = 12
+        elif p_prob >= 0.35:
+            priority = "Moderate"
+            repair_window_hours = 24
+        else:
+            priority = "Monitor"
+            repair_window_hours = 48
+
+        confidence = max(
+            0.25,
+            min(
+                0.98,
+                0.45
+                + min(0.35, int(zone.get("pothole_hits", 0)) * 0.05)
+                + min(0.20, float(zone.get("incident_rate", 0.0)) * 0.4),
+            ),
+        )
+
+        pothole_predictions.append(
+            {
+                "zone_id": zone.get("zone_id"),
+                "zone_label": zone.get("zone_label"),
+                "pothole_probability": round(p_prob, 5),
+                "confidence": round(confidence, 3),
+                "priority": priority,
+                "repair_window_hours": int(repair_window_hours),
+                "supporting_signals": {
+                    "pothole_hits": int(zone.get("pothole_hits", 0)),
+                    "incident_rate": float(zone.get("incident_rate", 0.0) or 0.0),
+                    "speed_penalty": round(1.0 - min(1.0, float(zone.get("avg_speed_kmh", 0.0) or 0.0) / 24.0), 5),
+                },
+            }
+        )
+
+    pothole_predictions.sort(key=lambda p: float(p.get("pothole_probability", 0.0)), reverse=True)
+    pothole_predictions = pothole_predictions[:8]
+
+    digital_twin = _build_digital_twin_scenarios(summary, zone_rows, rerouting_plan)
+
+    high_zone_ratio = len(risk_zones["HIGH"]) / max(1, len(zone_rows))
+    avg_pothole = float(np.mean([float(z.get("pothole_probability", 0.0) or 0.0) for z in zone_rows])) if zone_rows else 0.0
+    incident_ratio = float(summary.get("incident_frame_ratio", 0.0) or 0.0)
+    disaster_index = max(
+        0.0,
+        min(
+            100.0,
+            100.0 * (0.50 * high_zone_ratio + 0.28 * min(1.0, incident_ratio * 1.25) + 0.22 * avg_pothole),
+        ),
+    )
+
+    if disaster_index >= 70:
+        status = "CRITICAL"
+    elif disaster_index >= 45:
+        status = "WATCH"
+    else:
+        status = "STABLE"
+
+    playbook = _build_disaster_playbook(summary, rerouting_plan, pothole_predictions, digital_twin)
+
+    return {
+        "path": path,
+        "location_code": data.get("location_code"),
+        "sample_step": int(sample_step),
+        "summary": summary,
+        "kpis": analytics.get("kpis", {}),
+        "zone_summary": zone_summary,
+        "risk_zones": risk_zones,
+        "rerouting_plan": rerouting_plan,
+        "pothole_model": {
+            "model": {
+                "name": "Heuristic Pothole Risk Model v1",
+                "features": [
+                    "detected pothole labels",
+                    "stoppage/cluster events",
+                    "accident-class detections",
+                    "localized speed degradation",
+                ],
+                "calibration": "frame-local risk heuristics with zone normalization",
+            },
+            "detected_classes": pothole_class_counts,
+            "prediction_zones": pothole_predictions,
+            "event_samples": pothole_event_samples[:60],
+        },
+        "digital_twin": {
+            **digital_twin,
+            "grid": zone_rows,
+        },
+        "playbook": playbook,
+        "timeline": analytics.get("timeline", []),
+        "hotspots": analytics.get("hotspots", {}),
+        "recommendations": analytics.get("recommendations", []),
+        "improvement_plan": analytics.get("improvement_plan", []),
+        "disaster_index": round(disaster_index, 2),
+        "report": {
+            "status": status,
+            "headline": "Integrated disaster-management twin generated: accident zones, reroutes, pothole risk, and response playbook ready.",
+        },
+    }
+
+
 @router.get("/stream")
 def stream_video_compat(
     path: str = Query(...),
@@ -1087,6 +1889,8 @@ def stream_video_compat(
     show_heatmap: bool = Query(default=False),
     show_incidents: bool = Query(default=False),
     show_recommendations: bool = Query(default=False),
+    show_disaster_zones: bool = Query(default=False),
+    show_pothole_alerts: bool = Query(default=False),
     start_frame: int = Query(default=0, ge=0),
 ):
     return stream_cctv(
@@ -1099,6 +1903,8 @@ def stream_video_compat(
         show_heatmap=show_heatmap,
         show_incidents=show_incidents,
         show_recommendations=show_recommendations,
+        show_disaster_zones=show_disaster_zones,
+        show_pothole_alerts=show_pothole_alerts,
         start_frame=start_frame,
     )
 
@@ -1114,6 +1920,8 @@ def stream_cctv(
     show_heatmap: bool = Query(default=False),
     show_incidents: bool = Query(default=False),
     show_recommendations: bool = Query(default=False),
+    show_disaster_zones: bool = Query(default=False),
+    show_pothole_alerts: bool = Query(default=False),
     start_frame: int = Query(default=0, ge=0),
 ):
     full = _safe_out_path(path)
@@ -1170,8 +1978,10 @@ def stream_cctv(
                     frame = draw_heatmap(frame, normalized_map)
 
                 detections = {"stopped": [], "clusters": [], "stopped_points": []}
-                if show_incidents and incident_detector is not None and draw_incidents is not None:
+                if incident_detector is not None and (show_incidents or show_recommendations or show_disaster_zones):
                     detections = incident_detector.process(objects)
+
+                if show_incidents and draw_incidents is not None:
                     frame = draw_incidents(frame, detections)
 
                 if show_recommendations and generate_recommendations is not None and draw_recommendations is not None:
@@ -1189,6 +1999,15 @@ def stream_cctv(
                         "vehicle_count": len(objects),
                     }
                     frame = draw_recommendations(frame, insights)
+
+                if show_disaster_zones or show_pothole_alerts:
+                    frame = _draw_disaster_overlays(
+                        frame,
+                        objects,
+                        detections,
+                        show_disaster_zones=show_disaster_zones,
+                        show_pothole_alerts=show_pothole_alerts,
+                    )
             except Exception:
                 # Silently skip overlays if feature modules are unavailable.
                 pass

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { Bar, Line, Radar } from "react-chartjs-2";
+import { buildDisasterInsights } from "../utils/disasterFromAnalytics";
 import {
   BarElement,
   CategoryScale,
@@ -45,6 +46,12 @@ function gradeBadge(score) {
   if (score >= 80) return "badge-success";
   if (score >= 60) return "badge-pending";
   return "badge-error";
+}
+
+function statusBadge(status) {
+  if (status === "CRITICAL") return "badge-error";
+  if (status === "WATCH") return "badge-pending";
+  return "badge-success";
 }
 
 export default function JunctionReport() {
@@ -110,6 +117,7 @@ export default function JunctionReport() {
   const feedback = analytics?.report?.feedback || [];
   const timeline = analytics?.timeline || [];
   const hot = analytics?.hotspots || { density: [], stopped: [], clusters: [] };
+  const disaster = useMemo(() => buildDisasterInsights(analytics), [analytics]);
 
   const readiness = Number(kpis.junction_readiness || 0);
   const grade = readinessGrade(readiness);
@@ -462,6 +470,53 @@ export default function JunctionReport() {
     congestion_after_pct: congestionAfter,
     readiness_grade: grade,
     monitored_path: analytics?.path || selectedPath,
+  },
+  null,
+  2,
+)}
+            </div>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-title">Disaster Management (Embedded in Report)</div>
+          <div className="stat-row" style={{ marginBottom: 10 }}>
+            <div className="stat-card">
+              <div className="stat-label">Disaster Index</div>
+              <div className="stat-value">{Number(disaster?.disaster_index || 0).toFixed(1)}</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">Status</div>
+              <div style={{ marginTop: 6 }} className={`badge ${statusBadge(disaster?.status)}`}>
+                <span className="badge-dot" />
+                {disaster?.status || "STABLE"}
+              </div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">High Zones</div>
+              <div className="stat-value">{Number(disaster?.zone_summary?.HIGH || 0)}</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-label">Emergency Reroutes</div>
+              <div className="stat-value">{(disaster?.rerouting_plan || []).length}</div>
+            </div>
+          </div>
+
+          <div className="panel-grid panel-grid-2">
+            <div className="log-terminal" style={{ maxHeight: 220 }}>
+              {(disaster?.playbook || []).length === 0 ? (
+                <div className="text-muted">No disaster playbook generated.</div>
+              ) : (
+                (disaster?.playbook || []).map((line, idx) => <div key={`${idx}-${line}`}>• {line}</div>)
+              )}
+            </div>
+            <div className="json-viewer" style={{ maxHeight: 220 }}>
+{JSON.stringify(
+  {
+    zone_summary: disaster?.zone_summary,
+    rerouting_plan: (disaster?.rerouting_plan || []).slice(0, 4),
+    pothole_predictions: (disaster?.pothole_model?.prediction_zones || []).slice(0, 6),
+    best_twin_scenario: disaster?.digital_twin?.best_scenario || null,
   },
   null,
   2,

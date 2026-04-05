@@ -1,21 +1,35 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { Bar } from "react-chartjs-2";
+import { Search, Target, Activity } from "lucide-react";
 import { BarElement, CategoryScale, Chart as ChartJS, Legend, LinearScale, Tooltip } from "chart.js";
+import {
+  DEFAULT_SAMPLE_STEP,
+  fetchDisasterManagement,
+  fetchVisualizationFiles,
+  prefetchAnalytics,
+} from "../utils/visualizationApi";
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Tooltip, Legend);
 
 const chartAxis = {
-  ticks: { color: "rgba(200,216,240,0.78)", font: { size: 11 } },
-  grid: { color: "rgba(99,102,241,0.08)" },
-  border: { color: "rgba(99,102,241,0.2)" },
+  ticks: { color: "#a0a0a0", font: { size: 11, family: "Inter" } },
+  grid: { color: "#f0f0f0" },
+  border: { display: false },
 };
 
-function priorityBadge(p) {
-  if (p === "Critical") return "badge-error";
-  if (p === "High") return "badge-pending";
-  if (p === "Moderate") return "badge-info";
-  return "badge-success";
+function priorityColor(p) {
+  if (p === "Critical") return "#000";
+  if (p === "High") return "#3f3f46";
+  if (p === "Moderate") return "#a1a1aa";
+  return "#e4e4e7";
+}
+
+function priorityText(p) {
+  if (p === "Critical") return "#fff";
+  if (p === "High") return "#fff";
+  if (p === "Moderate") return "#000";
+  return "#000";
 }
 
 const ZONE_LABELS = [["NW","N","NE"],["W","Center","E"],["SW","S","SE"]];
@@ -31,26 +45,28 @@ export default function PotholeDetection() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/visualization/files")
-      .then(r => r.json())
-      .then(d => { const l = Array.isArray(d) ? d : []; setFiles(l); if (!queryPath && l.length > 0 && !selectedPath) setSelectedPath(l[0].path); })
+    fetchVisualizationFiles()
+      .then(l => { const list = Array.isArray(l) ? l : []; setFiles(list); if (!queryPath && list.length > 0 && !selectedPath) setSelectedPath(list[0].path); })
       .catch(() => {});
   }, []);
 
   useEffect(() => { if (queryPath) setSelectedPath(queryPath); }, [queryPath]);
 
-  async function loadData(path = selectedPath) {
+  async function loadData(path = selectedPath, { force = false } = {}) {
     if (!path) return;
     setLoading(true); setError("");
     try {
-      const r = await fetch(`/api/visualization/disaster-management?path=${encodeURIComponent(path)}&sample_step=4`);
-      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || `HTTP ${r.status}`); }
-      setData(await r.json());
+      const d = await fetchDisasterManagement(path, { sampleStep: DEFAULT_SAMPLE_STEP, force });
+      setData(d);
     } catch (e) { setError(String(e?.message || e)); }
     finally { setLoading(false); }
   }
 
-  useEffect(() => { if (selectedPath) loadData(selectedPath); }, [selectedPath]);
+  useEffect(() => {
+    if (!selectedPath) return;
+    loadData(selectedPath);
+    prefetchAnalytics(selectedPath, { sampleStep: DEFAULT_SAMPLE_STEP });
+  }, [selectedPath]);
 
   const potholeModel = data?.pothole_model || {};
   const modelInfo = potholeModel.model || {};
@@ -63,7 +79,6 @@ export default function PotholeDetection() {
   const highCount = predictions.filter(p => p.priority === "High").length;
   const avgConfidence = predictions.length ? (predictions.reduce((a, p) => a + (p.confidence || 0), 0) / predictions.length * 100).toFixed(1) : "0.0";
 
-  // Zone pothole heatmap
   const zoneGrid = useMemo(() => {
     const g = Array.from({ length: 3 }, () => Array.from({ length: 3 }, () => ({ prob: 0, label: "", hits: 0 })));
     grid.forEach(z => {
@@ -74,135 +89,124 @@ export default function PotholeDetection() {
     return g;
   }, [grid]);
 
-  // Detected classes bar chart
   const classLabels = Object.keys(detectedClasses);
   const classBarData = {
     labels: classLabels.length > 0 ? classLabels : ["(none detected)"],
     datasets: [{
       label: "Detections",
       data: classLabels.length > 0 ? classLabels.map(k => detectedClasses[k]) : [0],
-      backgroundColor: "rgba(239,68,68,0.55)",
-      borderColor: "#ef4444",
-      borderWidth: 1,
+      backgroundColor: "#000",
+      borderRadius: 4,
     }],
   };
 
   return (
-    <div className="fade-in" style={{ display: "grid", gap: 16 }}>
-      {/* Source selector */}
-      <div className="card" style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10, alignItems: "end" }}>
-        <div className="form-group" style={{ marginBottom: 0 }}>
-          <label className="form-label">Replay Source</label>
-          <select className="form-control" value={selectedPath} onChange={e => setSelectedPath(e.target.value)}>
-            {files.length === 0 && <option value="">(no replay files)</option>}
-            {files.map(f => <option key={f.path} value={f.path}>{f.path}</option>)}
+    <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+        <div>
+          <h1 style={{ fontSize: "24px", fontWeight: "800", color: "#111", margin: "0 0 8px 0" }}>Surface Defect Detection</h1>
+          <p style={{ color: "#737373", fontSize: "14px", margin: 0 }}>Pinpoint structural damage and dispatch repair queues.</p>
+        </div>
+        
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <select className="shdcn-input shdcn-select" style={{ width: "240px", cursor: "pointer" }} value={selectedPath} onChange={(e) => setSelectedPath(e.target.value)}>
+            {files.length === 0 && <option value="">(no files found)</option>}
+            {files.map(f => <option key={f.path} value={f.path}>{f.path.split('/').pop() || f.path}</option>)}
           </select>
+          <button className="shdcn-button shdcn-button-outline" onClick={() => loadData(selectedPath, { force: true })} disabled={!selectedPath || loading}>
+            {loading ? "Scanning Terrain..." : "Locate Defects"} <Target size={14} />
+          </button>
         </div>
-        <button className="btn btn-primary" onClick={() => loadData(selectedPath)} disabled={!selectedPath || loading}>
-          {loading ? "Scanning..." : "Detect Potholes"}
-        </button>
-      </div>
-      {error && <div className="alert alert-error">{error}</div>}
-
-      {/* Overview Stats */}
-      <div className="stat-row">
-        <div className="stat-card"><div className="stat-label">Prediction Zones</div><div className="stat-value">{predictions.length}</div></div>
-        <div className="stat-card"><div className="stat-label">Critical</div><div className="stat-value" style={{ color: "#f87171" }}>{criticalCount}</div></div>
-        <div className="stat-card"><div className="stat-label">High Priority</div><div className="stat-value" style={{ color: "#fbbf24" }}>{highCount}</div></div>
-        <div className="stat-card"><div className="stat-label">Avg Confidence</div><div className="stat-value">{avgConfidence}<span className="stat-unit">%</span></div></div>
-        <div className="stat-card"><div className="stat-label">Event Samples</div><div className="stat-value">{eventSamples.length}</div></div>
       </div>
 
-      {/* Model Info Card */}
-      <div className="card">
-        <div className="card-title">Detection Model</div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
-          <div>
-            <div className="stat-label">Model Name</div>
-            <div style={{ color: "#fff", fontWeight: 600, marginTop: 4 }}>{modelInfo.name || "N/A"}</div>
-          </div>
-          <div>
-            <div className="stat-label">Features</div>
-            <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 4 }}>{(modelInfo.features || []).join(" • ")}</div>
-          </div>
-          <div>
-            <div className="stat-label">Calibration</div>
-            <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 4 }}>{modelInfo.calibration || "N/A"}</div>
+      {error && <div style={{ background: "#fee2e2", border: "1px solid #ef4444", color: "#b91c1c", padding: "12px 16px", borderRadius: "6px", fontSize: "14px", fontWeight: "500" }}>{error}</div>}
+
+      <div className="stk-card" style={{ padding: "32px 24px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: "16px", alignItems: "center" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Prediction Zones</div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{predictions.length}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Critical Priority</div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{criticalCount}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>High Priority</div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{highCount}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Model Confidence</div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{avgConfidence}<span style={{fontWeight:"400", color:"#a3a3a3"}}>%</span></div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Event Samples</div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{eventSamples.length}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", borderLeft: "1px solid #e4e4e7", paddingLeft: "24px" }}>
+             <div style={{ fontSize: "11px", color: "#737373", fontWeight: "600", textTransform: "uppercase" }}>Model Network</div>
+             <div style={{ fontSize: "13px", fontWeight: "700", color: "#111" }}>{modelInfo.name || "N/A"}</div>
+             <div style={{ fontSize: "11px", color: "#a3a3a3" }}>{(modelInfo.features || []).join(" • ")} | {modelInfo.calibration || "N/A"}</div>
           </div>
         </div>
       </div>
 
-      {/* Priority Queue + Zone Heatmap */}
-      <div className="panel-grid panel-grid-2">
-        <div className="card" style={{ minHeight: 380 }}>
-          <div className="card-title">Priority Repair Queue</div>
-          <div style={{ display: "grid", gap: 8, maxHeight: 320, overflowY: "auto" }}>
-            {predictions.length === 0 ? (
-              <div className="alert alert-info" style={{ marginBottom: 0 }}>No pothole risk zones detected in this replay.</div>
-            ) : predictions.map((p, i) => (
-              <div key={p.zone_id || i} className="priority-item">
-                <div className={`badge ${priorityBadge(p.priority)}`}>
-                  <span className="badge-dot" />{p.priority}
-                </div>
-                <div>
-                  <div style={{ fontWeight: 600, color: "#fff", fontSize: 13 }}>{p.zone_label || p.zone_id}</div>
-                  <div className="text-mono" style={{ fontSize: 11, color: "#94a3b8" }}>
-                    Probability: {((p.pothole_probability || 0) * 100).toFixed(1)}% | Confidence: {((p.confidence || 0) * 100).toFixed(0)}%
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: "24px" }}>
+        
+        <div className="stk-card" style={{ height: "460px", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+           <div className="card-title">Priority Repair Queue</div>
+          <div style={{ flex: 1, overflowY: "auto", paddingRight: "8px" }}>
+            <table className="shdcn-table">
+               <thead>
+                 <tr>
+                    <th>Zone</th>
+                    <th>Priority</th>
+                    <th style={{ textAlign: "right" }}>Repair Limit</th>
+                 </tr>
+               </thead>
+               <tbody>
+               {predictions.length === 0 ? (
+                <tr><td colSpan="3" style={{ fontSize: "13px", color: "#737373", textAlign: "center", paddingTop: "40px" }}>No pothole risk zones detected in this replay.</td></tr>
+              ) : predictions.map((p, i) => (
+                <tr key={p.zone_id || i}>
+                   <td style={{ fontWeight: "600", fontSize: "13px" }}>{p.zone_label || p.zone_id}<div style={{ fontSize:"11px", color:"#737373", fontWeight:"400" }}>Prob: {((p.pothole_probability || 0) * 100).toFixed(1)}% | Conf: {((p.confidence || 0) * 100).toFixed(0)}%</div></td>
+                   <td><span className="shdcn-badge" style={{ background: priorityColor(p.priority), color: priorityText(p.priority) }}>{p.priority}</span></td>
+                   <td style={{ textAlign: "right", fontWeight: "700", fontSize: "14px" }}>{p.repair_window_hours}H</td>
+                </tr>
+              ))}
+               </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+          <div className="stk-card" style={{ flex: 1 }}>
+             <div className="card-title">Zone Defect Heatmap</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "4px", padding: "4px", background: "#f4f4f5", border: "1px solid #e8e8ea", borderRadius: "12px", height: "180px", marginBottom: "20px" }}>
+              {zoneGrid.map((row, ri) => row.map((cell, ci) => {
+                const pct = (cell.prob * 100).toFixed(0);
+                const bg = cell.prob >= 0.5 ? "#000" : cell.prob >= 0.25 ? "#71717a" : "#fff";
+                const txt = cell.prob >= 0.25 ? "#fff" : "#000";
+                const brd = cell.prob < 0.25 ? "#e4e4e7" : "transparent";
+                return (
+                  <div key={`${ri}-${ci}`} style={{ background: bg, border: `1px solid ${brd}`, borderRadius: "8px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "8px", gap: "4px" }}>
+                    <div style={{ fontWeight: 600, fontSize: "12px", color: txt }}>{cell.label}</div>
+                    <div style={{ fontSize: "16px", fontWeight: "700", color: txt }}>{pct}%</div>
+                    <div style={{ fontSize: "9px", color: txt, opacity: 0.6 }}>Hits: {cell.hits}</div>
                   </div>
-                  {p.supporting_signals && (
-                    <div className="text-mono" style={{ fontSize: 10, color: "#64748b", marginTop: 2 }}>
-                      Hits: {p.supporting_signals.pothole_hits || 0} | Incident rate: {((p.supporting_signals.incident_rate || 0) * 100).toFixed(1)}%
-                    </div>
-                  )}
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div className="text-mono" style={{ fontSize: 11, color: "#94a3b8" }}>Repair in</div>
-                  <div style={{ fontWeight: 700, color: p.repair_window_hours <= 6 ? "#f87171" : p.repair_window_hours <= 12 ? "#fbbf24" : "#94a3b8" }}>
-                    {p.repair_window_hours}h
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-        <div className="card" style={{ minHeight: 380 }}>
-          <div className="card-title">Zone Pothole Risk Heatmap</div>
-          <div className="zone-grid" style={{ marginBottom: 16 }}>
-            {zoneGrid.map((row, ri) => row.map((cell, ci) => {
-              const pct = (cell.prob * 100).toFixed(0);
-              const cls = cell.prob >= 0.5 ? "zone-high" : cell.prob >= 0.25 ? "zone-medium" : "zone-low";
-              return (
-                <div key={`${ri}-${ci}`} className={`zone-cell ${cls}`} style={{ padding: 12 }}>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>{ZONE_LABELS[ri][ci]}</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>{pct}%</div>
-                  <div style={{ fontSize: 10, marginTop: 2 }}>Hits: {cell.hits}</div>
-                </div>
-              );
-            }))}
-          </div>
-          <div style={{ height: 160 }}>
-            <Bar data={classBarData} options={{
-              responsive: true, maintainAspectRatio: false, indexAxis: "y",
-              plugins: { legend: { labels: { color: "rgba(220,240,255,0.9)" } } },
-              scales: { x: chartAxis, y: chartAxis },
-            }} />
+                );
+              }))}
+            </div>
+
+            <div style={{ height: "120px" }}>
+              <Bar data={classBarData} options={{ responsive: true, maintainAspectRatio: false, indexAxis: "y", plugins: { legend: { display:false } }, scales: { x: chartAxis, y: { ...chartAxis, grid: {display:false} } } }} />
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Event Evidence */}
-      <div className="card">
-        <div className="card-title">Event Evidence Log ({eventSamples.length} samples)</div>
-        <div className="log-terminal" style={{ maxHeight: 240 }}>
-          {eventSamples.length === 0 ? <div className="text-muted">No pothole events detected in this replay.</div> :
+      <div className="stk-card">
+         <div className="card-title">Event Evidence Log</div>
+        <div style={{ background: "#f4f4f5", border: "1px solid #e4e4e7", padding: "16px", borderRadius: "8px", maxHeight: "240px", overflowY: "auto", fontFamily: "var(--font-mono)", fontSize: "12px", display: "flex", flexDirection: "column", gap: "8px", color: "#000" }}>
+          {eventSamples.length === 0 ? <div style={{ color: "#737373" }}>No pothole events detected in this replay.</div> :
             eventSamples.slice(0, 40).map((ev, i) => (
-              <div key={i} style={{ color: ev.confidence >= 0.7 ? "#f87171" : "#94a3b8" }}>
-                Frame {ev.frame} | {ev.zone_label} | {ev.label} | conf: {(ev.confidence * 100).toFixed(0)}% | pos: [{ev.center?.[0]}, {ev.center?.[1]}]
+              <div key={i} style={{ display: "grid", gridTemplateColumns: "100px 100px 150px 1fr", gap: "10px", alignItems: "center", borderBottom: "1px solid #e4e4e7", paddingBottom: "6px" }}>
+                <span><span style={{color: "#a3a3a3"}}>FRM:</span> {ev.frame}</span>
+                <span style={{ fontWeight: "700" }}>{ev.zone_label}</span>
+                <span><span style={{color: "#a3a3a3"}}>CONF:</span> {(ev.confidence * 100).toFixed(0)}%</span>
+                <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>POS: [{ev.center?.[0]}, {ev.center?.[1]}] | {ev.label}</span>
               </div>
             ))
           }
         </div>
       </div>
+      
     </div>
   );
 }

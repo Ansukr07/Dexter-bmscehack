@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { Bar, Line, Radar, Doughnut } from "react-chartjs-2";
+import { Activity, Car, TrendingUp, AlertTriangle, ShieldCheck, MapPin } from "lucide-react";
+import {
+  DEFAULT_SAMPLE_STEP,
+  fetchAnalytics,
+  fetchVisualizationFiles,
+  prefetchDisasterManagement,
+} from "../utils/visualizationApi";
 import {
   ArcElement, BarElement, CategoryScale, Chart as ChartJS,
   Filler, Legend, LineElement, LinearScale, PointElement,
@@ -13,15 +20,15 @@ ChartJS.register(
 );
 
 const chartAxis = {
-  ticks: { color: "rgba(200,216,240,0.78)", font: { size: 11 } },
-  grid: { color: "rgba(99,102,241,0.08)" },
-  border: { color: "rgba(99,102,241,0.2)" },
+  ticks: { color: "#a0a0a0", font: { size: 11, family: "Inter" } },
+  grid: { color: "#f0f0f0" },
+  border: { display: false },
 };
 
 const smallOpts = {
   responsive: true, maintainAspectRatio: false,
-  plugins: { legend: { labels: { color: "rgba(220,240,255,0.92)" } } },
-  scales: { x: chartAxis, y: chartAxis },
+  plugins: { legend: { display: false } },
+  scales: { x: { display: false }, y: chartAxis },
 };
 
 export default function BehaviorPatterns() {
@@ -35,39 +42,37 @@ export default function BehaviorPatterns() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/visualization/files")
-      .then(r => r.json())
-      .then(d => {
-        const list = Array.isArray(d) ? d : [];
+    fetchVisualizationFiles()
+      .then(list => {
         setFiles(list);
         if (!queryPath && list.length > 0 && !selectedPath) setSelectedPath(list[0].path);
-      })
-      .catch(() => {});
+      }).catch(() => {});
   }, []);
 
   useEffect(() => { if (queryPath) setSelectedPath(queryPath); }, [queryPath]);
 
-  async function loadData(path = selectedPath) {
+  async function loadData(path = selectedPath, { force = false } = {}) {
     if (!path) return;
     setLoading(true); setError("");
     try {
-      const r = await fetch(`/api/visualization/analytics?path=${encodeURIComponent(path)}&sample_step=3`);
-      if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || `HTTP ${r.status}`); }
-      setAnalytics(await r.json());
+      const d = await fetchAnalytics(path, { sampleStep: DEFAULT_SAMPLE_STEP, force });
+      setAnalytics(d);
     } catch (e) { setError(String(e?.message || e)); }
     finally { setLoading(false); }
   }
 
-  useEffect(() => { if (selectedPath) loadData(selectedPath); }, [selectedPath]);
+  useEffect(() => {
+    if (!selectedPath) return;
+    loadData(selectedPath);
+    prefetchDisasterManagement(selectedPath, { sampleStep: DEFAULT_SAMPLE_STEP });
+  }, [selectedPath]);
 
   const timeline = analytics?.timeline || [];
   const summary = analytics?.summary || {};
   const kpis = analytics?.kpis || {};
   const distributions = analytics?.distributions || {};
-  const hotspots = analytics?.hotspots || {};
   const labels = timeline.map(t => String(t.frame));
 
-  // Speed distribution buckets
   const speedBuckets = useMemo(() => {
     const buckets = { "0-5": 0, "5-10": 0, "10-15": 0, "15-20": 0, "20-30": 0, "30+": 0 };
     timeline.forEach(t => {
@@ -82,7 +87,6 @@ export default function BehaviorPatterns() {
     return buckets;
   }, [timeline]);
 
-  // Congestion state transition counts
   const transitions = useMemo(() => {
     const t = { "LOW→LOW": 0, "LOW→MED": 0, "LOW→HIGH": 0, "MED→LOW": 0, "MED→MED": 0, "MED→HIGH": 0, "HIGH→LOW": 0, "HIGH→MED": 0, "HIGH→HIGH": 0 };
     const short = { LOW: "LOW", MEDIUM: "MED", HIGH: "HIGH" };
@@ -95,161 +99,155 @@ export default function BehaviorPatterns() {
     return t;
   }, [timeline]);
 
-  // Density evolution line
   const densityData = {
     labels,
     datasets: [{
       label: "Density", data: timeline.map(t => t.density),
-      borderColor: "#6366f1", backgroundColor: "rgba(99,102,241,0.2)", fill: true, tension: 0.28,
+      borderColor: "#000", backgroundColor: "rgba(0,0,0,0.05)", fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0
     }, {
       label: "Congestion Score", data: timeline.map(t => t.congestion_score),
-      borderColor: "#f59e0b", backgroundColor: "rgba(245,158,11,0.15)", fill: false, tension: 0.24,
+      borderColor: "#a1a1aa", backgroundColor: "transparent", fill: false, tension: 0.4, borderWidth: 2, borderDash: [4, 4], pointRadius: 0
     }],
   };
 
-  // Speed histogram
   const speedHistData = {
     labels: Object.keys(speedBuckets),
     datasets: [{
       label: "Frames in Range",
       data: Object.values(speedBuckets),
-      backgroundColor: ["rgba(16,185,129,0.5)", "rgba(99,102,241,0.5)", "rgba(139,92,246,0.5)", "rgba(245,158,11,0.5)", "rgba(239,68,68,0.4)", "rgba(239,68,68,0.6)"],
-      borderColor: ["#10b981", "#6366f1", "#8b5cf6", "#f59e0b", "#ef4444", "#ef4444"],
-      borderWidth: 1,
+      backgroundColor: ["#e4e4e7", "#d4d4d8", "#a1a1aa", "#71717a", "#3f3f46", "#000"],
+      borderRadius: 4,
     }],
   };
 
-  // Vehicle class doughnut
   const classTotals = distributions.class_totals || {};
   const classData = {
     labels: ["Car", "Bike", "Bus", "Truck", "Other"],
     datasets: [{
       data: [classTotals.car || 0, classTotals.bike || 0, classTotals.bus || 0, classTotals.truck || 0, classTotals.other || 0],
-      backgroundColor: ["rgba(99,102,241,0.65)", "rgba(16,185,129,0.65)", "rgba(139,92,246,0.65)", "rgba(245,158,11,0.65)", "rgba(239,68,68,0.65)"],
-      borderColor: ["#6366f1", "#10b981", "#8b5cf6", "#f59e0b", "#ef4444"],
+      backgroundColor: ["#000", "#3f3f46", "#71717a", "#a1a1aa", "#e4e4e7"],
+      borderWidth: 0,
     }],
   };
 
-  // KPI radar
   const radarData = {
     labels: ["Throughput", "Stability", "Safety", "Readiness"],
     datasets: [{
       label: "Current", data: [kpis.throughput_index || 0, kpis.stability_index || 0, kpis.safety_index || 0, kpis.junction_readiness || 0],
-      borderColor: "#6366f1", backgroundColor: "rgba(99,102,241,0.2)",
-    }, {
-      label: "Ideal", data: [85, 90, 95, 88],
-      borderColor: "#10b981", backgroundColor: "rgba(16,185,129,0.08)", borderDash: [4, 4],
+      borderColor: "#000", backgroundColor: "rgba(0,0,0,0.05)", borderWidth: 2,
     }],
   };
 
-  // Vehicle count + stopped vehicles
   const flowData = {
     labels,
     datasets: [{
-      label: "Vehicles", data: timeline.map(t => t.vehicle_count),
-      borderColor: "#6366f1", backgroundColor: "rgba(99,102,241,0.18)", fill: true, tension: 0.28, yAxisID: "yL",
+      label: "Vehicles Tracked", data: timeline.map(t => t.vehicle_count),
+      borderColor: "#000", backgroundColor: "rgba(0,0,0,0.05)", fill: true, tension: 0.4, borderWidth: 2, yAxisID: "yL", pointRadius: 0
     }, {
-      label: "Stopped", data: timeline.map(t => t.stopped_vehicles || 0),
-      borderColor: "#ef4444", backgroundColor: "rgba(239,68,68,0.2)", fill: true, tension: 0.24, yAxisID: "yR",
+      label: "Stopped Hazards", data: timeline.map(t => t.stopped_vehicles || 0),
+      borderColor: "#71717a", backgroundColor: "transparent", fill: true, tension: 0.4, borderWidth: 2, yAxisID: "yR", pointRadius: 0
     }],
   };
 
-  const flowOpts = {
-    responsive: true, maintainAspectRatio: false,
-    plugins: { legend: { labels: { color: "rgba(220,240,255,0.92)" } } },
-    scales: {
-      x: chartAxis,
-      yL: { ...chartAxis, position: "left" },
-      yR: { ...chartAxis, position: "right", grid: { drawOnChartArea: false } },
-    },
-  };
-
   return (
-    <div className="fade-in" style={{ display: "grid", gap: 16 }}>
-      {/* Source selector */}
-      <div className="card" style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10, alignItems: "end" }}>
-        <div className="form-group" style={{ marginBottom: 0 }}>
-          <label className="form-label">Replay Source</label>
-          <select className="form-control" value={selectedPath} onChange={e => setSelectedPath(e.target.value)}>
-            {files.length === 0 && <option value="">(no replay files)</option>}
-            {files.map(f => <option key={f.path} value={f.path}>{f.path}</option>)}
+    <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+        <div>
+          <h1 style={{ fontSize: "24px", fontWeight: "800", color: "#111", margin: "0 0 8px 0" }}>Behavior Patterns</h1>
+          <p style={{ color: "#737373", fontSize: "14px", margin: 0 }}>Systemic flow patterns, speed profiles, and macroscopic tracking traces.</p>
+        </div>
+        
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <select className="shdcn-input shdcn-select" style={{ width: "240px", cursor: "pointer" }} value={selectedPath} onChange={(e) => setSelectedPath(e.target.value)}>
+            {files.length === 0 && <option value="">(no files found)</option>}
+            {files.map((f) => <option key={f.path} value={f.path}>{f.path.split('/').pop() || f.path}</option>)}
           </select>
+          <button className="shdcn-button shdcn-button-outline" onClick={() => loadData(selectedPath, { force: true })} disabled={!selectedPath || loading}>
+            {loading ? "Analyzing..." : "Analyze Pipeline"} <Activity size={14} />
+          </button>
         </div>
-        <button className="btn btn-primary" onClick={() => loadData(selectedPath)} disabled={!selectedPath || loading}>
-          {loading ? "Loading..." : "Analyze"}
-        </button>
-      </div>
-      {error && <div className="alert alert-error">{error}</div>}
-
-      {/* KPI Overview */}
-      <div className="stat-row">
-        <div className="stat-card"><div className="stat-label">Avg Speed</div><div className="stat-value">{Number(summary.avg_speed_kmh || 0).toFixed(1)}<span className="stat-unit">km/h</span></div></div>
-        <div className="stat-card"><div className="stat-label">Avg Vehicles</div><div className="stat-value">{Number(summary.avg_vehicle_count || 0).toFixed(0)}</div></div>
-        <div className="stat-card"><div className="stat-label">Peak Count</div><div className="stat-value">{summary.peak_vehicle_count ?? 0}</div></div>
-        <div className="stat-card"><div className="stat-label">Stability</div><div className="stat-value">{Number(kpis.stability_index || 0).toFixed(1)}</div></div>
-        <div className="stat-card"><div className="stat-label">Safety</div><div className="stat-value">{Number(kpis.safety_index || 0).toFixed(1)}</div></div>
       </div>
 
-      {/* Row 1: Speed Distribution + Class Composition */}
-      <div className="panel-grid panel-grid-2">
-        <div className="card" style={{ minHeight: 320 }}>
-          <div className="card-title">Speed Distribution Profile (km/h)</div>
-          <div style={{ height: 250 }}>
-            <Bar data={speedHistData} options={smallOpts} />
+      {error && <div style={{ background: "#fee2e2", border: "1px solid #ef4444", color: "#b91c1c", padding: "12px 16px", borderRadius: "6px", fontSize: "14px", fontWeight: "500" }}>{error}</div>}
+
+      <div className="stk-card" style={{ padding: "32px 24px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "16px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Avg Speed <span style={{fontWeight:"400", color:"#a3a3a3"}}>km/h</span></div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{Number(summary.avg_speed_kmh || 0).toFixed(1)}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Volume <span style={{fontWeight:"400", color:"#a3a3a3"}}>Total</span></div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{Number(summary.avg_vehicle_count || 0).toFixed(0)}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Peak Flow <span style={{fontWeight:"400", color:"#a3a3a3"}}>Max</span></div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{summary.peak_vehicle_count ?? 0}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Stability Index <span style={{fontWeight:"400", color:"#a3a3a3"}}>/100</span></div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{Number(kpis.stability_index || 0).toFixed(1)}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Safety Score <span style={{fontWeight:"400", color:"#a3a3a3"}}>/100</span></div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{Number(kpis.safety_index || 0).toFixed(1)}</div></div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
+        <div className="stk-card" style={{ height: "340px" }}>
+          <div className="card-title"><div>Speed Distribution <span style={{fontSize:"11px", fontWeight:"500", color:"#737373", marginLeft:"4px"}}>km/h</span></div></div>
+          <div style={{ flex: 1, position: "relative" }}><Bar data={speedHistData} options={{ ...smallOpts, scales: { x: { grid: { display: false }, border: { display: false }, ticks: { font: { size: 10, family: "Inter" } } }, y: chartAxis } }} /></div>
+        </div>
+        
+        <div className="stk-card" style={{ height: "340px" }}>
+          <div className="card-title"><div>Vehicle Composition <span style={{fontSize:"11px", fontWeight:"500", color:"#737373", marginLeft:"4px"}}>Classes</span></div></div>
+          <div style={{ flex: 1, position: "relative" }}>
+            <Doughnut data={classData} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right", labels: { color: "#737373", font: { size: 11, family: "Inter" }, boxWidth: 10 } } }, cutout: "70%" }} />
+            <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", textAlign: "center", pointerEvents: "none", marginLeft: "-40px" }}>
+              <div style={{ fontSize: "24px", fontWeight: "800", letterSpacing: "-0.5px", color: "#111" }}>{Object.values(classTotals).reduce((a,b)=>a+b,0)}</div>
+              <div style={{ fontSize: "11px", color: "#737373", fontWeight:"500" }}>Total</div>
+            </div>
           </div>
         </div>
-        <div className="card" style={{ minHeight: 320 }}>
-          <div className="card-title">Vehicle Class Composition</div>
-          <div style={{ height: 250 }}>
-            <Doughnut data={classData} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: "rgba(220,240,255,0.9)" } } } }} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
+        <div className="stk-card" style={{ height: "340px" }}>
+          <div className="card-title">Vehicle Count & Stationary Hazards</div>
+          <div style={{ flex: 1, position: "relative" }}>
+            <Line data={flowData} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { display:false } }, scales: { x: { display: false }, yL: { ...chartAxis, position: "left" }, yR: { ...chartAxis, position: "right", grid: { drawOnChartArea: false } } } }} />
+          </div>
+        </div>
+        
+        <div className="stk-card" style={{ height: "340px" }}>
+          <div className="card-title">Density & Congestion Evolution</div>
+          <div style={{ flex: 1, position: "relative" }}>
+             <Line data={densityData} options={{ ...smallOpts, scales: { x: { display: false }, y: { ...chartAxis, min: 0, max: 1 } } }} />
           </div>
         </div>
       </div>
 
-      {/* Row 2: Vehicle Flow + Density/Congestion */}
-      <div className="panel-grid panel-grid-2">
-        <div className="card" style={{ minHeight: 320 }}>
-          <div className="card-title">Vehicle Count vs Stopped Vehicles</div>
-          <div style={{ height: 250 }}><Line data={flowData} options={flowOpts} /></div>
-        </div>
-        <div className="card" style={{ minHeight: 320 }}>
-          <div className="card-title">Density & Congestion Timeline</div>
-          <div style={{ height: 250 }}><Line data={densityData} options={{ ...smallOpts, scales: { x: chartAxis, y: { ...chartAxis, min: 0, max: 1 } } }} /></div>
-        </div>
-      </div>
-
-      {/* Row 3: KPI Radar + Congestion Transitions */}
-      <div className="panel-grid panel-grid-2">
-        <div className="card" style={{ minHeight: 340 }}>
-          <div className="card-title">KPI Behavior Fingerprint (Current vs Ideal)</div>
-          <div style={{ height: 270 }}>
-            <Radar data={radarData} options={{
-              responsive: true, maintainAspectRatio: false,
-              plugins: { legend: { labels: { color: "rgba(220,240,255,0.92)" } } },
-              scales: { r: { angleLines: { color: "rgba(99,102,241,0.15)" }, grid: { color: "rgba(99,102,241,0.15)" }, pointLabels: { color: "rgba(220,240,255,0.85)" }, ticks: { display: false }, min: 0, max: 100 } },
-            }} />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.5fr", gap: "24px" }}>
+        <div className="stk-card" style={{ height: "360px" }}>
+          <div className="card-title">KPI Fingerprint</div>
+          <div style={{ flex: 1, position: "relative" }}>
+            <Radar data={radarData} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { r: { angleLines: { color: "#f0f0f0" }, grid: { color: "#f0f0f0" }, pointLabels: { color: "#737373", font: { size: 10, family: "Inter", weight:"600" } }, ticks: { display: false }, min: 0, max: 100 } } }} />
           </div>
         </div>
-        <div className="card" style={{ minHeight: 340 }}>
+        
+        <div className="stk-card" style={{ height: "360px", overflow: "hidden" }}>
           <div className="card-title">Congestion State Transitions</div>
-          <div style={{ fontSize: 12 }}>
-            <table className="data-table" style={{ width: "100%" }}>
-              <thead><tr><th>From → To</th><th>Count</th><th>Share</th></tr></thead>
+          <div style={{ flex: 1, overflowY: "auto" }}>
+            <table className="shdcn-table" style={{ width: "100%" }}>
+              <thead>
+                <tr>
+                  <th>Transition</th>
+                  <th>Occurrences</th>
+                  <th style={{ width: "60%" }}>Distribution</th>
+                </tr>
+              </thead>
               <tbody>
                 {Object.entries(transitions).map(([key, count]) => {
                   const total = Math.max(1, timeline.length - 1);
                   const pct = ((count / total) * 100).toFixed(1);
-                  const color = key.includes("HIGH") ? "#f87171" : key.includes("MED") ? "#fbbf24" : "#34d399";
                   return (
                     <tr key={key}>
-                      <td style={{ fontFamily: "var(--font-mono)", color }}>{key}</td>
-                      <td>{count}</td>
+                      <td style={{ fontWeight: "600" }}>{key}</td>
+                      <td style={{ fontWeight: "700" }}>{count}</td>
                       <td>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <div className="progress-track" style={{ flex: 1, height: 4 }}>
-                            <div className="progress-fill" style={{ width: `${pct}%`, background: color }} />
+                        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                          <div style={{ flex: 1, height: "6px", background: "#f4f4f5", borderRadius: "3px" }}>
+                            <div style={{ width: `${pct}%`, height: "100%", background: "#000", borderRadius: "3px" }} />
                           </div>
-                          <span style={{ fontSize: 11, color: "#94a3b8" }}>{pct}%</span>
+                          <div style={{ fontSize: "12px", width: "40px", textAlign: "right", fontWeight: "600", color: "#737373" }}>{pct}%</div>
                         </div>
                       </td>
                     </tr>
@@ -260,14 +258,7 @@ export default function BehaviorPatterns() {
           </div>
         </div>
       </div>
-
-      {/* Hotspot Evidence */}
-      <div className="card">
-        <div className="card-title">Hotspot Density Evidence</div>
-        <div className="json-viewer" style={{ maxHeight: 200 }}>
-{JSON.stringify({ density: (hotspots.density || []).slice(0, 8), stopped: (hotspots.stopped || []).slice(0, 6) }, null, 2)}
-        </div>
-      </div>
+      
     </div>
   );
 }

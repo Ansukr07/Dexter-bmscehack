@@ -35,7 +35,9 @@ from modules.incidents import IncidentDetector, draw_incidents
 from modules.recommendations import draw_recommendations
 
 # --- Constants ---
-OUTPUT_DIR = "output"
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
+LOCATION_DIR = os.path.join(PROJECT_ROOT, "location")
 
 # ==========================================
 # VISUALIZATION TAB
@@ -107,6 +109,7 @@ class VisualizationTab(QWidget):
 
         self.svg_layer_groups = {} 
         self.file_paths = []
+        self.current_replay_path = None
 
         self.cct_renderer = CCTRenderer()
         self.sat_renderer = SatRenderer()
@@ -515,11 +518,17 @@ class VisualizationTab(QWidget):
 
                 # We filter loosely to show all json results found in output
                 full_path = os.path.join(root, file)
-                self.file_paths.append(full_path)
+                if os.path.isfile(full_path):
+                    self.file_paths.append(os.path.abspath(full_path))
+
+        self.file_paths.sort(key=lambda p: p.lower())
 
         # Populate combo with 1-based numeric indices + readable relative path
         for i, full_path in enumerate(self.file_paths):
-            rel_path = os.path.relpath(full_path, OUTPUT_DIR)
+            try:
+                rel_path = os.path.relpath(full_path, OUTPUT_DIR)
+            except ValueError:
+                rel_path = full_path
             display = f"{i+1}: {rel_path}"
             self.file_combo.addItem(display)
 
@@ -527,6 +536,30 @@ class VisualizationTab(QWidget):
             self.file_combo.addItem("(no files found in output/)")
         
         self.file_combo.blockSignals(False)
+
+    def _resolve_existing_path(self, raw_path, base_dir=None):
+        raw = str(raw_path or "").strip()
+        if not raw:
+            return ""
+
+        base_dir = os.path.abspath(base_dir) if base_dir else None
+        norm_raw = os.path.normpath(raw)
+        candidates = [norm_raw]
+
+        if not os.path.isabs(norm_raw):
+            candidates.append(os.path.normpath(os.path.join(PROJECT_ROOT, norm_raw)))
+            if base_dir:
+                candidates.append(os.path.normpath(os.path.join(base_dir, norm_raw)))
+
+        seen = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            if os.path.exists(candidate):
+                return os.path.abspath(candidate)
+
+        return os.path.abspath(candidates[-1])
 
     def load_selected_file(self):
         # Debug: confirm this method is being invoked
@@ -539,7 +572,25 @@ class VisualizationTab(QWidget):
         idx = self.file_combo.currentIndex()
         if idx < 0 or not self.file_paths: return
         try:
-            path = self.file_paths[idx]
+            path = self._resolve_existing_path(self.file_paths[idx])
+
+            if os.path.isdir(path):
+                replay_candidates = []
+                for root, _, files in os.walk(path):
+                    for name in files:
+                        if name.endswith(".json") or name.endswith(".json.gz"):
+                            replay_candidates.append(os.path.join(root, name))
+                replay_candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                if replay_candidates:
+                    path = replay_candidates[0]
+                else:
+                    raise FileNotFoundError(f"No replay JSON found under: {path}")
+
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Replay file missing: {path}")
+
+            self.current_replay_path = path
+
             if path.endswith('.gz'):
                 with gzip.open(path, 'rt', encoding='utf-8') as f:
                     data = json.load(f)
@@ -605,9 +656,13 @@ class VisualizationTab(QWidget):
         self.sat_scene.addItem(self.sat_dyn_item)
         self.svg_layer_groups = {}
 
-        loc = data["location_code"]
+        loc = data.get("location_code", "")
+        if not loc:
+            self.lbl_info.setText("Replay missing location_code")
+            return
+
         # Path: location/{loc}/G_projection_{loc}.json
-        base = os.path.join("location", loc)
+        base = os.path.join(LOCATION_DIR, loc)
         g_path = os.path.join(base, f"G_projection_{loc}.json")
         
         if not os.path.exists(g_path):
@@ -668,8 +723,8 @@ class VisualizationTab(QWidget):
         # Affine matrix is now at layout_svg['A']
         affine_mat = layout_svg.get('A', [[1,0,0],[0,1,0]])
 
-        sat_p = os.path.join(base, inputs.get('sat_path', ''))
-        if os.path.exists(sat_p):
+        sat_p = self._resolve_existing_path(inputs.get('sat_path', ''), base_dir=base)
+        if sat_p and os.path.exists(sat_p):
             self.sat_pixmap_item = QGraphicsPixmapItem(QPixmap(sat_p))
             self.sat_pixmap_item.setZValue(0)
             self.sat_scene.addItem(self.sat_pixmap_item)
@@ -682,7 +737,7 @@ class VisualizationTab(QWidget):
 
         svg_file = inputs.get('layout_path')
         if svg_file:
-            svg_p = os.path.join(base, svg_file)
+            svg_p = self._resolve_existing_path(svg_file, base_dir=base)
             if os.path.exists(svg_p):
                 parser = SVGLayoutParser(svg_p, affine_mat)
                 z_order = {'Background': 1, 'Aesthetic': 2, 'Guidelines': 3, 'Physical': 4, 'Anchors': 5}
@@ -759,7 +814,10 @@ class VisualizationTab(QWidget):
         te.setReadOnly(True)
         lines = []
         for i, full_path in enumerate(self.file_paths):
-            rel = os.path.relpath(full_path, OUTPUT_DIR)
+            try:
+                rel = os.path.relpath(full_path, OUTPUT_DIR)
+            except ValueError:
+                rel = full_path
             lines.append(f"{i+1}: {rel} \n")
         te.setPlainText("\n".join(lines) if lines else "(no files found in output/)")
         v.addWidget(te)
@@ -821,7 +879,7 @@ class VisualizationTab(QWidget):
 
         loc = data.get("location_code", "")
         roi_filename = f"roi_{loc}.png"
-        p = os.path.join("location", loc, roi_filename)
+        p = os.path.join(LOCATION_DIR, loc, roi_filename)
 
         try:
             self.lbl_info.setText(f"Checking ROI: {os.path.basename(p)}")
@@ -940,7 +998,21 @@ class VisualizationTab(QWidget):
     def setup_video(self, data):
         # Handle path normalization
         raw_path = data.get("mp4_path", "")
-        path = os.path.normpath(raw_path)
+        base_dir = os.path.dirname(self.current_replay_path) if self.current_replay_path else None
+        path = self._resolve_existing_path(raw_path, base_dir=base_dir)
+
+        if not raw_path:
+            self.lbl_info.setText("Replay JSON missing mp4_path")
+            return
+
+        if os.path.isdir(path):
+            video_candidates = []
+            for name in os.listdir(path):
+                if name.lower().endswith((".mp4", ".avi", ".mov", ".mkv", ".webm")):
+                    video_candidates.append(os.path.join(path, name))
+            video_candidates.sort()
+            if video_candidates:
+                path = video_candidates[0]
         
         if not os.path.exists(path):
             self.lbl_info.setText(f"Video not found: {path}")

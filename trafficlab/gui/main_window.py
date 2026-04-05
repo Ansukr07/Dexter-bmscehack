@@ -2,7 +2,6 @@ import os
 import sys
 from PyQt5.QtCore import Qt, QEvent
 from PyQt5.QtWidgets import QMainWindow, QTabWidget, QApplication, QWidget, QVBoxLayout, QLabel, QTextBrowser, QHBoxLayout
-from .tabs.tab_welcome import WelcomeTab
 from .tabs.tab_calibration import CalibrationTab
 from .tabs.tab_inference import InferenceTab
 from .tabs.tab_visualization import VisualizationTab
@@ -18,8 +17,7 @@ class MainWindow(QMainWindow):
 
         # Create tabs and set as central widget
         tabs = QTabWidget()
-        
-        tabs.addTab(WelcomeTab(), "Welcome")
+
         tabs.addTab(LocationTab(), "Location")
         tabs.addTab(CalibrationTab(), "Calibration")
         tabs.addTab(InferenceTab(), "Inference")

@@ -5,6 +5,8 @@ import gzip
 import time
 import math
 import hashlib
+from collections import OrderedDict
+from threading import RLock
 import xml.etree.ElementTree as ET
 
 import cv2
@@ -52,6 +54,11 @@ router = APIRouter()
 
 _LAYER_NAMES = ["Background", "Aesthetic", "Guidelines", "Physical"]
 _COLOR_CACHE = {}
+_CACHE_LOCK = RLock()
+_REPLAY_CACHE_MAX_ITEMS = 6
+_API_RESPONSE_CACHE_MAX_ITEMS = 16
+_REPLAY_CACHE = OrderedDict()
+_API_RESPONSE_CACHE = OrderedDict()
 
 
 def _safe_out_path(rel_path: str) -> str:
@@ -66,12 +73,61 @@ def _safe_out_path(rel_path: str) -> str:
     return full
 
 
+def _file_signature(path: str) -> tuple[int, int]:
+    st = os.stat(path)
+    return int(st.st_mtime_ns), int(st.st_size)
+
+
+def _cache_get(cache: OrderedDict, key):
+    with _CACHE_LOCK:
+        value = cache.get(key)
+        if value is None:
+            return None
+        cache.move_to_end(key)
+        return value
+
+
+def _cache_set(cache: OrderedDict, key, value, max_items: int):
+    with _CACHE_LOCK:
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > max(1, int(max_items)):
+            cache.popitem(last=False)
+
+
+def _timeline_sample(timeline_full: list[dict], sample_step: int) -> list[dict]:
+    if not timeline_full:
+        return []
+
+    step = max(1, int(sample_step))
+    if step <= 1:
+        return timeline_full
+
+    last_idx = len(timeline_full) - 1
+    sampled = [row for idx, row in enumerate(timeline_full) if (idx % step) == 0 or idx == last_idx]
+    if sampled and sampled[-1] is not timeline_full[last_idx]:
+        sampled.append(timeline_full[last_idx])
+    return sampled
+
+
 def _load_replay(path: str) -> dict:
     if path.endswith(".gz"):
         with gzip.open(path, "rt", encoding="utf-8") as f:
             return json.load(f)
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _load_replay_cached(path: str) -> tuple[dict, tuple[int, int]]:
+    sig = _file_signature(path)
+    key = (path, sig[0], sig[1])
+    cached = _cache_get(_REPLAY_CACHE, key)
+    if cached is not None:
+        return cached, sig
+
+    data = _load_replay(path)
+    _cache_set(_REPLAY_CACHE, key, data, _REPLAY_CACHE_MAX_ITEMS)
+    return data, sig
 
 
 def _load_g_projection(loc_code: str) -> dict | None:
@@ -1317,7 +1373,7 @@ def list_files():
 def get_data(path: str = Query(...)):
     full = _safe_out_path(path)
     try:
-        data = _load_replay(full)
+        data, _ = _load_replay_cached(full)
         frame_map = _frame_map(data)
         has_3d = False
         for _, objs in list(frame_map.items())[:50]:
@@ -1353,15 +1409,20 @@ def get_analytics(
 ):
     full = _safe_out_path(path)
     try:
-        data = _load_replay(full)
+        data, sig = _load_replay_cached(full)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, f"Failed to load replay: {e}")
 
+    cache_key = ("analytics", full, sig[0], sig[1], int(sample_step))
+    cached_response = _cache_get(_API_RESPONSE_CACHE, cache_key)
+    if cached_response is not None:
+        return cached_response
+
     frames = data.get("frames", []) or []
     if not frames:
-        return {
+        response = {
             "path": path,
             "location_code": data.get("location_code"),
             "frame_shape": [720, 1280],
@@ -1377,6 +1438,8 @@ def get_analytics(
                 "feedback": [],
             },
         }
+        _cache_set(_API_RESPONSE_CACHE, cache_key, response, _API_RESPONSE_CACHE_MAX_ITEMS)
+        return response
 
     frame_h, frame_w = _infer_frame_shape(data)
     grid_size = max(36, int(min(frame_h, frame_w) / 14))
@@ -1544,7 +1607,7 @@ def get_analytics(
     if high_ratio > 0.30:
         feedback.append("High congestion persistence suggests potential approach-capacity deficit.")
 
-    return {
+    response = {
         "path": path,
         "location_code": data.get("location_code"),
         "frame_shape": [int(frame_h), int(frame_w)],
@@ -1570,6 +1633,8 @@ def get_analytics(
             "overlay_features_available": OVERLAY_FEATURES_AVAILABLE,
         },
     }
+    _cache_set(_API_RESPONSE_CACHE, cache_key, response, _API_RESPONSE_CACHE_MAX_ITEMS)
+    return response
 
 
 @router.get("/disaster-management")
@@ -1577,22 +1642,27 @@ def get_disaster_management(
     path: str = Query(...),
     sample_step: int = Query(default=5, ge=1, le=240),
 ):
-    analytics = get_analytics(path=path, sample_step=sample_step)
-
     full = _safe_out_path(path)
     try:
-        data = _load_replay(full)
+        data, sig = _load_replay_cached(full)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(500, f"Failed to load replay: {e}")
+
+    cache_key = ("disaster", full, sig[0], sig[1], int(sample_step))
+    cached_response = _cache_get(_API_RESPONSE_CACHE, cache_key)
+    if cached_response is not None:
+        return cached_response
+
+    analytics = get_analytics(path=path, sample_step=sample_step)
 
     frames = data.get("frames", []) or []
     frame_h, frame_w = _infer_frame_shape(data)
     summary = analytics.get("summary", {}) or {}
 
     if not frames:
-        return {
+        response = {
             "path": path,
             "location_code": data.get("location_code"),
             "sample_step": int(sample_step),
@@ -1622,6 +1692,8 @@ def get_disaster_management(
                 "headline": "No replay frames available for disaster-management analytics.",
             },
         }
+        _cache_set(_API_RESPONSE_CACHE, cache_key, response, _API_RESPONSE_CACHE_MAX_ITEMS)
+        return response
 
     zones = _init_disaster_zones(frame_h, frame_w)
     pothole_class_counts = {}
@@ -1837,7 +1909,7 @@ def get_disaster_management(
 
     playbook = _build_disaster_playbook(summary, rerouting_plan, pothole_predictions, digital_twin)
 
-    return {
+    response = {
         "path": path,
         "location_code": data.get("location_code"),
         "sample_step": int(sample_step),
@@ -1876,6 +1948,8 @@ def get_disaster_management(
             "headline": "Integrated disaster-management twin generated: accident zones, reroutes, pothole risk, and response playbook ready.",
         },
     }
+    _cache_set(_API_RESPONSE_CACHE, cache_key, response, _API_RESPONSE_CACHE_MAX_ITEMS)
+    return response
 
 
 @router.get("/stream")
@@ -1928,7 +2002,7 @@ def stream_cctv(
 
     def generate():
         try:
-            data = _load_replay(full)
+            data, _ = _load_replay_cached(full)
         except Exception:
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(blank, "Failed to load replay", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 80, 255), 2)
@@ -2059,7 +2133,7 @@ def stream_sat(
 
     def generate():
         try:
-            data = _load_replay(full)
+            data, _ = _load_replay_cached(full)
         except Exception:
             blank = np.zeros((480, 640, 3), dtype=np.uint8)
             cv2.putText(blank, "Failed to load replay", (20, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 80, 255), 2)

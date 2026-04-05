@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { Line, Bar, Radar } from "react-chartjs-2";
+import { Line } from "react-chartjs-2";
+import { Droplets, Map, Activity, ShieldCheck, Search, Navigation } from "lucide-react";
 import {
   DEFAULT_SAMPLE_STEP,
   fetchDisasterManagement,
@@ -15,35 +16,36 @@ import {
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, BarElement, RadialLinearScale, Tooltip, Legend, Filler);
 
 const chartAxis = {
-  ticks: { color: "rgba(200,216,240,0.78)", font: { size: 11 } },
-  grid: { color: "rgba(99,102,241,0.08)" },
-  border: { color: "rgba(99,102,241,0.2)" },
+  ticks: { color: "#a0a0a0", font: { size: 11, family: "Inter" } },
+  grid: { color: "#f0f0f0" },
+  border: { display: false },
 };
 
 const smallOpts = {
   responsive: true,
   maintainAspectRatio: false,
   plugins: { legend: { display: false } },
-  elements: { point: { radius: 2, hoverRadius: 4 } },
+  elements: { point: { radius: 0, hoverRadius: 4 } },
+  scales: { x: { display: false }, y: chartAxis },
 };
-
-function statusBadge(s) {
-  if (s === "CRITICAL") return "badge-error";
-  if (s === "WATCH") return "badge-pending";
-  return "badge-success";
-}
-
-function severityClass(s) {
-  if (s === "HIGH") return "zone-high";
-  if (s === "MEDIUM") return "zone-medium";
-  return "zone-low";
-}
 
 const ZONE_LABELS = [
   ["NW","N","NE"],
   ["W","Center","E"],
   ["SW","S","SE"],
 ];
+
+function statusBg(s) {
+  if (s === "CRITICAL") return "#000";
+  if (s === "WATCH") return "#71717a";
+  return "#e4e4e7";
+}
+
+function statusText(s) {
+  if (s === "CRITICAL") return "#fff";
+  if (s === "WATCH") return "#fff";
+  return "#000";
+}
 
 export default function FloodDetection() {
   const loc = useLocation();
@@ -82,14 +84,12 @@ export default function FloodDetection() {
   const summary = data?.summary || {};
   const timeline = data?.timeline || [];
   const zoneSummary = data?.zone_summary || {};
-  const riskZones = data?.risk_zones || {};
   const digitalTwin = data?.digital_twin || {};
   const grid = digitalTwin.grid || [];
   const playbook = data?.playbook || [];
   const disasterIndex = Number(data?.disaster_index || 0);
   const status = data?.report?.status || "STABLE";
 
-  // Build 3x3 zone grid
   const zoneGrid = useMemo(() => {
     const g = Array.from({ length: 3 }, () => Array.from({ length: 3 }, () => ({ risk: 0, sev: "LOW", speed: 0, label: "" })));
     grid.forEach(z => {
@@ -100,13 +100,11 @@ export default function FloodDetection() {
     return g;
   }, [grid]);
 
-  // Flood risk index (derived from disaster index + speed anomaly)
   const floodRiskIndex = useMemo(() => {
     const speedPenalty = summary.avg_speed_kmh ? Math.max(0, 1 - (summary.avg_speed_kmh / 20)) * 25 : 0;
     return Math.min(100, disasterIndex + speedPenalty).toFixed(1);
   }, [disasterIndex, summary]);
 
-  // Speed anomaly detection
   const speedAnomalies = useMemo(() => {
     if (timeline.length < 5) return [];
     const speeds = timeline.map(t => Number(t.avg_speed_kmh || 0));
@@ -117,12 +115,11 @@ export default function FloodDetection() {
 
   const labels = timeline.map(t => String(t.frame));
 
-  // Speed anomaly chart
   const speedChartData = {
     labels,
     datasets: [{
       label: "Speed (km/h)", data: timeline.map(t => t.avg_speed_kmh),
-      borderColor: "#6366f1", backgroundColor: "rgba(99,102,241,0.15)", fill: true, tension: 0.28,
+      borderColor: "#000", backgroundColor: "rgba(0,0,0,0.05)", fill: true, tension: 0.4, borderWidth: 2,
     }, {
       label: "Anomaly Threshold",
       data: (() => {
@@ -131,21 +128,19 @@ export default function FloodDetection() {
         const std = Math.sqrt(speeds.reduce((a, s) => a + (s - mean) ** 2, 0) / (speeds.length || 1)) || 1;
         return timeline.map(() => Math.max(0, mean - 1.5 * std));
       })(),
-      borderColor: "#ef4444", borderDash: [6, 3], backgroundColor: "rgba(239,68,68,0.08)", fill: true, tension: 0, pointRadius: 0,
+      borderColor: "#71717a", borderDash: [4, 4], backgroundColor: "transparent", fill: false, tension: 0, borderWidth: 2,
     }],
   };
 
-  // Risk recovery
   const projectedTimeline = digitalTwin.projected_risk_timeline || [];
   const recoveryData = {
     labels: projectedTimeline.map((_, i) => `T+${i + 1}`),
     datasets: [{
       label: "Projected Risk Recovery", data: projectedTimeline,
-      borderColor: "#10b981", backgroundColor: "rgba(16,185,129,0.2)", fill: true, tension: 0.28,
+      borderColor: "#000", backgroundColor: "rgba(0,0,0,0.05)", fill: true, tension: 0.4, borderWidth: 2,
     }],
   };
 
-  // Waterlog probability = zones sorted by risk_score * speed_penalty
   const waterlogZones = useMemo(() =>
     [...grid].sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0)).slice(0, 6).map(z => ({
       ...z, waterlog_prob: Math.min(1, (z.risk_score || 0) * 0.6 + (1 - Math.min(1, (z.avg_speed_kmh || 0) / 20)) * 0.4),
@@ -153,108 +148,119 @@ export default function FloodDetection() {
   [grid]);
 
   return (
-    <div className="fade-in" style={{ display: "grid", gap: 16 }}>
-      {/* Source selector */}
-      <div className="card" style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10, alignItems: "end" }}>
-        <div className="form-group" style={{ marginBottom: 0 }}>
-          <label className="form-label">Replay Source</label>
-          <select className="form-control" value={selectedPath} onChange={e => setSelectedPath(e.target.value)}>
-            {files.length === 0 && <option value="">(no replay files)</option>}
-            {files.map(f => <option key={f.path} value={f.path}>{f.path}</option>)}
+    <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+        <div>
+          <h1 style={{ fontSize: "24px", fontWeight: "800", color: "#111", margin: "0 0 8px 0" }}>Flood Vulnerability</h1>
+          <p style={{ color: "#737373", fontSize: "14px", margin: 0 }}>Assess environmental impacts, waterlogging probabilities, and recovery plans.</p>
+        </div>
+        
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <select className="shdcn-input shdcn-select" style={{ width: "240px", cursor: "pointer" }} value={selectedPath} onChange={(e) => setSelectedPath(e.target.value)}>
+            {files.length === 0 && <option value="">(no files found)</option>}
+            {files.map(f => <option key={f.path} value={f.path}>{f.path.split('/').pop() || f.path}</option>)}
           </select>
-        </div>
-        <button className="btn btn-primary" onClick={() => loadData(selectedPath, { force: true })} disabled={!selectedPath || loading}>
-          {loading ? "Scanning..." : "Analyze Flood Risk"}
-        </button>
-      </div>
-      {error && <div className="alert alert-error">{error}</div>}
-
-      {/* Flood Risk Overview */}
-      <div className="stat-row">
-        <div className="stat-card">
-          <div className="stat-label">Flood Risk Index</div>
-          <div className="stat-value" style={{ color: Number(floodRiskIndex) >= 60 ? "#f87171" : Number(floodRiskIndex) >= 35 ? "#fbbf24" : "#34d399" }}>{floodRiskIndex}</div>
-          <div className={`badge ${statusBadge(status)}`} style={{ marginTop: 8 }}><span className="badge-dot" />{status}</div>
-        </div>
-        <div className="stat-card"><div className="stat-label">High Risk Zones</div><div className="stat-value">{zoneSummary.HIGH || 0}</div></div>
-        <div className="stat-card"><div className="stat-label">Medium Zones</div><div className="stat-value">{zoneSummary.MEDIUM || 0}</div></div>
-        <div className="stat-card"><div className="stat-label">Avg Speed</div><div className="stat-value">{Number(summary.avg_speed_kmh || 0).toFixed(1)}<span className="stat-unit">km/h</span></div></div>
-        <div className="stat-card"><div className="stat-label">Anomalies Detected</div><div className="stat-value">{speedAnomalies.filter(a => a.isAnomaly).length}</div></div>
-      </div>
-
-      {/* Zone Vulnerability Grid + Speed Anomaly */}
-      <div className="panel-grid panel-grid-2">
-        <div className="card" style={{ minHeight: 340 }}>
-          <div className="card-title">Zone Vulnerability Grid</div>
-          <div className="zone-grid" style={{ marginBottom: 12 }}>
-            {zoneGrid.map((row, ri) => row.map((cell, ci) => (
-              <div key={`${ri}-${ci}`} className={`zone-cell ${severityClass(cell.sev)}`}>
-                <div style={{ fontWeight: 700, fontSize: 13 }}>{ZONE_LABELS[ri][ci]}</div>
-                <div style={{ fontSize: 10, marginTop: 4 }}>Risk: {(cell.risk * 100).toFixed(0)}%</div>
-                <div style={{ fontSize: 10 }}>{cell.speed.toFixed(1)} km/h</div>
-              </div>
-            )))}
-          </div>
-          <div className="alert alert-info" style={{ marginBottom: 0, fontSize: 11 }}>
-            Zones are color-coded by risk severity. Low speed + high density = potential waterlogging.
-          </div>
-        </div>
-        <div className="card" style={{ minHeight: 340 }}>
-          <div className="card-title">Speed Anomaly Detection</div>
-          <div style={{ height: 255 }}>
-            <Line data={speedChartData} options={{ ...smallOpts, scales: { x: chartAxis, y: chartAxis } }} />
-          </div>
-          <div className="text-mono" style={{ marginTop: 4, fontSize: 11, color: "#94a3b8" }}>
-            Red dashed line = anomaly threshold (1.5σ below mean). Points below indicate potential disruption.
-          </div>
+          <button className="shdcn-button shdcn-button-outline" onClick={() => loadData(selectedPath, { force: true })} disabled={!selectedPath || loading}>
+            {loading ? "Scanning Terrain..." : "Analyze Flood Risk"} <Droplets size={14} />
+          </button>
         </div>
       </div>
 
-      {/* Waterlog Probability + Recovery */}
-      <div className="panel-grid panel-grid-2">
-        <div className="card" style={{ minHeight: 340 }}>
-          <div className="card-title">Waterlog Probability Zones</div>
-          <div style={{ display: "grid", gap: 8 }}>
-            {waterlogZones.map((z, i) => (
-              <div key={z.zone_id || i} className="priority-item">
-                <div className={`badge ${z.waterlog_prob >= 0.6 ? "badge-error" : z.waterlog_prob >= 0.35 ? "badge-pending" : "badge-success"}`}>
-                  {(z.waterlog_prob * 100).toFixed(0)}%
+      {error && <div style={{ background: "#fee2e2", border: "1px solid #ef4444", color: "#b91c1c", padding: "12px 16px", borderRadius: "6px", fontSize: "14px", fontWeight: "500" }}>{error}</div>}
+
+      <div className="stk-card" style={{ padding: "32px 24px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "16px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Flood Risk Index <span style={{fontWeight:"400", color:"#a3a3a3"}}>/100</span></div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{floodRiskIndex}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Hazards High <span style={{fontWeight:"400", color:"#a3a3a3"}}>Zones</span></div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{zoneSummary.HIGH || 0}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Hazards Medium <span style={{fontWeight:"400", color:"#a3a3a3"}}>Zones</span></div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{zoneSummary.MEDIUM || 0}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Avg Speed <span style={{fontWeight:"400", color:"#a3a3a3"}}>km/h</span></div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{Number(summary.avg_speed_kmh || 0).toFixed(1)}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Speed Anomalies <span style={{fontWeight:"400", color:"#a3a3a3"}}>Count</span></div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{speedAnomalies.filter(a => a.isAnomaly).length}</div></div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }}>
+        <div className="stk-card" style={{ height: "360px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+             <h3 style={{ fontSize: "14px", fontWeight: "600", letterSpacing: "-0.5px" }}>Zone Vulnerability Grid</h3>
+            <span className="shdcn-badge shdcn-badge-solid" style={{ background: statusBg(status), color: statusText(status) }}>{status}</span>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "4px", padding: "4px", background: "#f4f4f5", borderRadius: "12px", height: "calc(100% - 70px)", border: "1px solid #e8e8e8" }}>
+            {zoneGrid.map((row, ri) => row.map((cell, ci) => {
+              const bg = cell.sev === "HIGH" ? "#000" : cell.sev === "MEDIUM" ? "#71717a" : "#ffffff";
+              const txt = cell.sev === "HIGH" || cell.sev === "MEDIUM" ? "#ffffff" : "#000";
+              const brd = cell.sev === "LOW" ? "#e4e4e7" : "transparent";
+              
+              return (
+                <div key={`${ri}-${ci}`} style={{ background: bg, border: `1px solid ${brd}`, borderRadius: "8px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "10px", gap: "8px" }}>
+                  <div style={{ fontWeight: 600, fontSize: "13px", color: txt }}>{cell.label}</div>
+                  <div style={{ fontSize: "11px", color: txt, opacity: 0.8 }}>Risk: {(cell.risk * 100).toFixed(0)}%</div>
+                  <div style={{ fontSize: "10px", color: txt, opacity: 0.6 }}>{cell.speed.toFixed(1)} km/h</div>
                 </div>
-                <div>
-                  <div style={{ fontWeight: 600, color: "#fff", fontSize: 13 }}>{z.zone_label}</div>
-                  <div className="text-mono" style={{ fontSize: 11, color: "#94a3b8" }}>
-                    Risk: {((z.risk_score || 0) * 100).toFixed(0)}% | Speed: {(z.avg_speed_kmh || 0).toFixed(1)} km/h
-                  </div>
-                </div>
-                <div className="progress-track" style={{ width: 80, height: 6 }}>
-                  <div className="progress-fill" style={{ width: `${z.waterlog_prob * 100}%`, background: z.waterlog_prob >= 0.6 ? "#ef4444" : z.waterlog_prob >= 0.35 ? "#f59e0b" : "#10b981" }} />
-                </div>
-              </div>
-            ))}
-            {waterlogZones.length === 0 && <div className="text-muted" style={{ fontSize: 12 }}>No zone data available</div>}
+              );
+            }))}
           </div>
         </div>
-        <div className="card" style={{ minHeight: 340 }}>
-          <div className="card-title">Emergency Response — Projected Risk Recovery</div>
+
+        <div className="stk-card" style={{ height: "360px" }}>
+           <div className="card-title"><div>Speed Anomaly Detection <span style={{fontSize:"11px", fontWeight:"500", color:"#737373", marginLeft:"4px"}}>Kinematics</span></div></div>
+          <div style={{ flex: 1, position: "relative" }}>
+            <Line data={speedChartData} options={smallOpts} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: "24px" }}>
+        <div className="stk-card" style={{ height: "340px", overflow: "hidden" }}>
+           <div className="card-title">Waterlog Probability Heat</div>
+          <div style={{ flex: 1, overflowY: "auto" }}>
+            <table className="shdcn-table" style={{ width: "100%" }}>
+               <thead>
+                 <tr>
+                    <th>Zone Label</th>
+                    <th style={{ width: "50%" }}>Probability</th>
+                 </tr>
+               </thead>
+               <tbody>
+                  {waterlogZones.map((z, i) => (
+                    <tr key={i}>
+                       <td style={{ fontWeight: "600", fontSize: "13px" }}>{z.zone_label}<div style={{ fontSize:"11px", color:"#737373", fontWeight:"400" }}>Risk {(z.risk_score*100).toFixed(0)}%</div></td>
+                       <td>
+                          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                             <div style={{ flex: 1, height: "6px", background: "#f4f4f5", borderRadius: "3px" }}>
+                                <div style={{ width: `${z.waterlog_prob * 100}%`, height: "100%", background: "#000", borderRadius: "3px" }} />
+                             </div>
+                             <span style={{ fontSize: "12px", color: "#111", fontWeight: "600", width: "35px", textAlign: "right" }}>{(z.waterlog_prob * 100).toFixed(0)}%</span>
+                          </div>
+                       </td>
+                    </tr>
+                  ))}
+               </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="stk-card" style={{ height: "340px" }}>
+           <div className="card-title">Projected Risk Recovery</div>
           {projectedTimeline.length > 0 ? (
-            <div style={{ height: 240 }}>
-              <Line data={recoveryData} options={{ ...smallOpts, scales: { x: chartAxis, y: { ...chartAxis, min: 0, max: 1 } } }} />
+            <div style={{ flex: 1, position: "relative" }}>
+               <Line data={recoveryData} options={{ ...smallOpts, scales: { x: { display: false }, y: { ...chartAxis, min: 0, max: 1 } } }} />
             </div>
           ) : (
-            <div className="alert alert-info" style={{ marginBottom: 0 }}>No projected recovery timeline available for this replay.</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", fontSize: "13px", color: "#a3a3a3" }}>No projected recovery timeline available.</div>
           )}
         </div>
       </div>
 
-      {/* Playbook */}
-      <div className="card">
-        <div className="card-title">Flood Emergency Action Playbook</div>
-        <div className="log-terminal" style={{ maxHeight: 200 }}>
-          {playbook.length === 0 ? <div className="text-muted">No playbook actions generated.</div> :
-            playbook.map((line, i) => <div key={i}>• {line}</div>)
+      <div className="stk-card">
+        <div className="card-title">AI Emergency Action Playbook</div>
+        <div style={{ background: "#f4f4f5", padding: "16px", borderRadius: "8px", maxHeight: "200px", overflowY: "auto", fontFamily: "var(--font-mono)", fontSize: "13px", color: "#000", display: "flex", flexDirection: "column", gap: "12px", border: "1px solid #e8e8ea" }}>
+          {playbook.length === 0 ? <div style={{ color: "#737373" }}>System idle. No playbook actions generated.</div> :
+            playbook.map((line, i) => <div key={i} style={{ display: "flex", gap: "12px" }}><span style={{ color: "#a3a3a3", fontWeight: "bold" }}>{i+1}.</span> <span>{line}</span></div>)
           }
         </div>
       </div>
+      
     </div>
   );
 }

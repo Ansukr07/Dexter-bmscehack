@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import visualizationDemo from '../assets/image.png';
 import locationDemo from '../assets/image copy.png';
+import videoBg from '../assets/video.mp4';
 import './LandingPage.css';
 
 // ─── Intersection Observer for scroll animations ───────────────
@@ -110,18 +111,15 @@ export default function LandingPage() {
             {/* ── Location pins at road intersections ── */}
             {[
               { left: '27%', top: '44%', delay: '0s' },
-
-
               { left: '69%', top: '38%', delay: '0.3s' },
               { left: '82%', top: '48%', delay: '0.3s' },
-
               { left: '45%', top: '65%', delay: '0.9s' },
             ].map(({ left, top, delay }, i) => (
               <div
                 key={i}
                 className="lp-pin-wrapper"
                 style={{ left, top }}
-                onClick={() => navigate('/')}
+                onClick={() => navigate('/dashboard/visualization')}
               >
                 <div className="lp-pin-tooltip">See the visualisation →</div>
                 <div className="lp-pin" style={{ animationDelay: delay }} />
@@ -230,6 +228,43 @@ export default function LandingPage() {
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── ANALYSIS MODULES WITH VIDEO BG ── */}
+      <section id="analysis-layer" className="lp-video-section">
+        <video autoPlay loop muted playsInline className="lp-video-bg">
+          <source src={videoBg} type="video/mp4" />
+        </video>
+        <div className="lp-video-overlay" />
+        
+        <div className="lp-features-inner lp-reveal" style={{ position: 'relative', zIndex: 2, padding: '100px 0' }}>
+          <div className="lp-features-header">
+            <div className="lp-features-label" style={{ color: 'var(--primary)', borderColor: 'rgba(139, 92, 246, 0.3)', background: 'rgba(139, 92, 246, 0.1)' }}>Core Capabilities</div>
+            <h2 className="lp-features-title" style={{ fontSize: 'clamp(2rem, 3.5vw, 3.2rem)' }}>
+              Complete AI Pipeline Edge Processing
+            </h2>
+            <p className="lp-features-sub" style={{ fontSize: '1.2rem' }}>
+              Advanced telemetry layers that transform raw CCTV feeds into a sophisticated urban digital twin.
+            </p>
+          </div>
+          
+          <div className="lp-feature-grid">
+            {[
+              'Analysis',
+              'Analytics',
+              'Junction Report',
+              'Behavior Patterns',
+              'Flood Detection',
+              'Pothole Detection',
+              'Disaster Rerouting',
+            ].map(f => (
+              <div key={f} className="lp-vid-card">
+                <span className="lp-vid-card-icon">✦</span>
+                <span className="lp-vid-card-text">{f}</span>
+              </div>
+            ))}
           </div>
         </div>
       </section>

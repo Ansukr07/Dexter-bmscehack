@@ -8,6 +8,7 @@ if PROJECT_ROOT not in sys.path:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from api.routers import config, locations, inference, visualization
@@ -21,6 +22,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 app.include_router(config.router, prefix="/api/config", tags=["Config"])
 app.include_router(locations.router, prefix="/api/locations", tags=["Locations"])

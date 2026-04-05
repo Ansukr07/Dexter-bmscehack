@@ -1004,3 +1004,79 @@
   font-size: 12px;
   color: rgba(200, 191, 255, 0.3);
 }
+/* ── ANALYSIS VIDEO BG SECTION ── */
+.lp-video-section {
+  position: relative;
+  overflow: hidden;
+  background-color: #000;
+  color: #fff;
+  min-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.lp-video-bg {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  min-width: 100%;
+  min-height: 100%;
+  width: auto;
+  height: auto;
+  transform: translate(-50%, -50%);
+  object-fit: cover;
+  z-index: 0;
+  opacity: 0.85;
+}
+
+.lp-video-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(12,8,28,0.4), rgba(0,0,0,0.2));
+  z-index: 1;
+}
+
+.lp-feature-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  max-width: 1200px;
+  margin: 80px auto 0;
+  justify-content: center;
+  align-items: center;
+}
+
+.lp-vid-card {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 24px 32px;
+  border-radius: 99px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  transition: all 0.3s ease;
+  cursor: default;
+}
+
+.lp-vid-card:hover {
+  background: rgba(139, 92, 246, 0.2);
+  border-color: rgba(139, 92, 246, 0.5);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 30px rgba(139, 92, 246, 0.2);
+}
+
+.lp-vid-card-icon {
+  color: var(--primary);
+  font-size: 1.5rem;
+}
+
+.lp-vid-card-text {
+  font-size: 1.3rem;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  color: #fff;
+}

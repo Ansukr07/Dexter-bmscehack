@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { Bar, Line, Radar } from "react-chartjs-2";
+import { ChevronDown, ExternalLink, ArrowLeft } from "lucide-react";
 import { buildDisasterInsights } from "../utils/disasterFromAnalytics";
+import {
+  DEFAULT_SAMPLE_STEP,
+  fetchAnalytics,
+  fetchVisualizationFiles,
+  prefetchDisasterManagement,
+} from "../utils/visualizationApi";
 import {
   BarElement,
   CategoryScale,
@@ -24,13 +31,13 @@ ChartJS.register(
   RadialLinearScale,
   Tooltip,
   Legend,
-  Filler,
+  Filler
 );
 
 const chartAxis = {
-  ticks: { color: "rgba(200,216,240,0.78)", font: { size: 11 } },
-  grid: { color: "rgba(0,212,255,0.08)" },
-  border: { color: "rgba(0,212,255,0.2)" },
+  ticks: { color: "#a0a0a0", font: { size: 11, family: "Inter" } },
+  grid: { color: "#f0f0f0" },
+  border: { display: false },
 };
 
 function readinessGrade(score) {
@@ -42,24 +49,13 @@ function readinessGrade(score) {
   return "F";
 }
 
-function gradeBadge(score) {
-  if (score >= 80) return "badge-success";
-  if (score >= 60) return "badge-pending";
-  return "badge-error";
-}
-
-function statusBadge(status) {
-  if (status === "CRITICAL") return "badge-error";
-  if (status === "WATCH") return "badge-pending";
-  return "badge-success";
+function gradeColor(score) {
+  return score >= 80 ? "#111" : score >= 60 ? "#666" : "#000";
 }
 
 export default function JunctionReport() {
   const location = useLocation();
-  const queryPath = useMemo(
-    () => new URLSearchParams(location.search).get("path") || "",
-    [location.search],
-  );
+  const queryPath = useMemo(() => new URLSearchParams(location.search).get("path") || "", [location.search]);
 
   const [files, setFiles] = useState([]);
   const [selectedPath, setSelectedPath] = useState(queryPath);
@@ -68,463 +64,181 @@ export default function JunctionReport() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch("/api/visualization/files")
-      .then((r) => r.json())
-      .then((d) => {
-        const list = Array.isArray(d) ? d : [];
-        setFiles(list);
-        if (!queryPath && list.length > 0 && !selectedPath) {
-          setSelectedPath(list[0].path);
-        }
-      })
-      .catch(() => {});
-  }, [queryPath, selectedPath]);
-
-  useEffect(() => {
-    if (!queryPath) return;
-    setSelectedPath(queryPath);
+    fetchVisualizationFiles().then((list) => {
+      setFiles(list);
+      if (!queryPath && list.length > 0 && !selectedPath) setSelectedPath(list[0].path);
+    }).catch(() => {});
   }, [queryPath]);
 
-  async function refreshReport(path = selectedPath) {
+  useEffect(() => { if (queryPath) setSelectedPath(queryPath); }, [queryPath]);
+
+  async function refreshReport(path = selectedPath, { force = false } = {}) {
     if (!path) return;
-    setLoading(true);
-    setError("");
+    setLoading(true); setError("");
     try {
-      const r = await fetch(
-        `/api/visualization/analytics?path=${encodeURIComponent(path)}&sample_step=4`,
-      );
-      if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        throw new Error(d.detail || `HTTP ${r.status}`);
-      }
-      const d = await r.json();
+      const d = await fetchAnalytics(path, { sampleStep: DEFAULT_SAMPLE_STEP, force });
       setAnalytics(d);
-    } catch (e) {
-      setError(String(e?.message || e));
-    } finally {
-      setLoading(false);
-    }
+    } catch (e) { setError(String(e?.message || e)); } finally { setLoading(false); }
   }
 
   useEffect(() => {
     if (!selectedPath) return;
     refreshReport(selectedPath);
+    prefetchDisasterManagement(selectedPath, { sampleStep: DEFAULT_SAMPLE_STEP });
   }, [selectedPath]);
 
   const summary = analytics?.summary || {};
   const kpis = analytics?.kpis || {};
   const plan = analytics?.improvement_plan || [];
-  const feedback = analytics?.report?.feedback || [];
   const timeline = analytics?.timeline || [];
-  const hot = analytics?.hotspots || { density: [], stopped: [], clusters: [] };
-  const disaster = useMemo(() => buildDisasterInsights(analytics), [analytics]);
-
+  
   const readiness = Number(kpis.junction_readiness || 0);
   const grade = readinessGrade(readiness);
-
-  const cumulativeReduction = Math.min(
-    52,
-    (plan || []).reduce(
-      (sum, p) => sum + Number(p.expected_delay_reduction_pct || 0),
-      0,
-    ),
-  );
-
+  const cumulativeReduction = Math.min(52, plan.reduce((sum, p) => sum + Number(p.expected_delay_reduction_pct || 0), 0));
   const congestionBase = Math.round(Number(summary.high_congestion_ratio || 0) * 100);
   const congestionAfter = Math.max(0, Math.round(congestionBase * (1 - cumulativeReduction / 100)));
 
   const kpiRadarData = {
     labels: ["Throughput", "Stability", "Safety", "Readiness"],
-    datasets: [
-      {
-        label: "Current Junction Profile",
-        data: [
-          Number(kpis.throughput_index || 0),
-          Number(kpis.stability_index || 0),
-          Number(kpis.safety_index || 0),
-          Number(kpis.junction_readiness || 0),
-        ],
-        borderColor: "#00d4ff",
-        backgroundColor: "rgba(0,212,255,0.24)",
-      },
-    ],
+    datasets: [{
+      label: "Current Junction Profile",
+      data: [Number(kpis.throughput_index || 0), Number(kpis.stability_index || 0), Number(kpis.safety_index || 0), Number(kpis.junction_readiness || 0)],
+      borderColor: "#000", backgroundColor: "rgba(0,0,0,0.05)", borderWidth: 2,
+    }],
   };
 
   const beforeAfterData = {
     labels: ["High Congestion Share", "Incident Frame Share"],
     datasets: [
-      {
-        label: "Current %",
-        data: [
-          Number((summary.high_congestion_ratio || 0) * 100),
-          Number((summary.incident_frame_ratio || 0) * 100),
-        ],
-        backgroundColor: "rgba(255,64,96,0.55)",
-        borderColor: "#ff4060",
-        borderWidth: 1,
-      },
-      {
-        label: "Projected % (post-plan)",
-        data: [
-          Math.max(0, Number((summary.high_congestion_ratio || 0) * 100) - cumulativeReduction),
-          Math.max(0, Number((summary.incident_frame_ratio || 0) * 100) - cumulativeReduction * 0.6),
-        ],
-        backgroundColor: "rgba(0,255,136,0.55)",
-        borderColor: "#00ff88",
-        borderWidth: 1,
-      },
+      { label: "Current %", data: [Number((summary.high_congestion_ratio || 0) * 100), Number((summary.incident_frame_ratio || 0) * 100)], backgroundColor: "#000", borderRadius: 4, barThickness: 32 },
+      { label: "Projected % (post-plan)", data: [Math.max(0, Number((summary.high_congestion_ratio || 0) * 100) - cumulativeReduction), Math.max(0, Number((summary.incident_frame_ratio || 0) * 100) - cumulativeReduction * 0.6)], backgroundColor: "#d4d4d8", borderRadius: 4, barThickness: 32 },
     ],
   };
 
   const riskTrendData = {
-    labels: timeline.map((t) => String(t.frame)),
+    labels: timeline.map(t => String(t.frame)),
     datasets: [
-      {
-        label: "Risk Score",
-        data: timeline.map((t) => t.risk_score),
-        borderColor: "#ff4060",
-        backgroundColor: "rgba(255,64,96,0.26)",
-        fill: true,
-        tension: 0.24,
-      },
-      {
-        label: "Avg Speed (normalized)",
-        data: timeline.map((t) => Math.min(1, Number(t.avg_speed_kmh || 0) / 24)),
-        borderColor: "#00ff88",
-        backgroundColor: "rgba(0,255,136,0.2)",
-        fill: false,
-        tension: 0.22,
-      },
+      { label: "Risk Score", data: timeline.map(t => t.risk_score), borderColor: "#000", backgroundColor: "rgba(0,0,0,0.04)", fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2 },
+      { label: "Avg Speed (normalized)", data: timeline.map(t => Math.min(1, Number(t.avg_speed_kmh || 0) / 24)), borderColor: "#a1a1aa", backgroundColor: "transparent", fill: false, tension: 0.4, pointRadius: 0, borderWidth: 2, borderDash: [4, 4] },
     ],
   };
 
   return (
-    <>
-      <div className="page-header">
-        <div className="page-title">Junction Improvement Report</div>
-        <div className="page-subtitle">
-          Dense Decision Report: KPI Radar, Risk Trends, Delay Reduction Projection, and Action Priorities
+    <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
+        <div>
+          <h1 style={{ fontSize: "24px", fontWeight: "800", color: "#111", margin: "0 0 8px 0" }}>Junction Improvement Report</h1>
+          <p style={{ color: "#737373", fontSize: "14px", margin: 0 }}>Dense Decision Report: KPI Radar, Risk Trends, Delay Reduction Projection, and Action Priorities</p>
+        </div>
+        
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <div style={{ position: "relative" }}>
+            <select className="shdcn-input shdcn-select" style={{ width: "240px", cursor: "pointer" }} value={selectedPath} onChange={(e) => setSelectedPath(e.target.value)}>
+              {files.length === 0 && <option value="">(no replay files found)</option>}
+              {files.map((f) => <option key={f.path} value={f.path}>{f.path.split('/').pop() || f.path}</option>)}
+            </select>
+          </div>
+          <button className="shdcn-button shdcn-button-outline" onClick={() => refreshReport(selectedPath, { force: true })} disabled={!selectedPath || loading}>
+            {loading ? "Refreshing..." : "Refresh Report"}
+          </button>
+          <Link to={`/dashboard/ai-analytics?path=${encodeURIComponent(selectedPath || "")}`} className="shdcn-button shdcn-button-primary">
+            Open AI Analytics <ExternalLink size={14} />
+          </Link>
+          <Link to={`/dashboard/visualization?path=${encodeURIComponent(selectedPath || "")}`} className="shdcn-button shdcn-button-ghost">
+            <ArrowLeft size={14} /> Back
+          </Link>
         </div>
       </div>
 
-      <div className="page-body fade-in" style={{ display: "grid", gap: 14 }}>
-        <div className="card" style={{ display: "grid", gap: 10 }}>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "minmax(260px, 2fr) auto auto auto",
-              gap: 10,
-              alignItems: "end",
-            }}
-          >
-            <div className="form-group" style={{ marginBottom: 0 }}>
-              <label className="form-label">Replay Source</label>
-              <select
-                className="form-control"
-                value={selectedPath}
-                onChange={(e) => setSelectedPath(e.target.value)}
-              >
-                {files.length === 0 && <option value="">(no replay files found)</option>}
-                {files.map((f) => (
-                  <option key={f.path} value={f.path}>
-                    {f.path}
-                  </option>
-                ))}
-              </select>
-            </div>
+      {error && <div style={{ background: "#fee2e2", border: "1px solid #ef4444", color: "#b91c1c", padding: "12px 16px", borderRadius: "6px", fontSize: "14px", fontWeight: "500" }}>{error}</div>}
 
-            <button
-              className="btn btn-primary"
-              onClick={() => refreshReport(selectedPath)}
-              disabled={!selectedPath || loading}
-            >
-              {loading ? "Refreshing..." : "Refresh Report"}
-            </button>
-
-            <Link
-              className="btn btn-ghost"
-              to={`/ai-analytics?path=${encodeURIComponent(selectedPath || "")}`}
-            >
-              Open AI Analytics
-            </Link>
-
-            <Link
-              className="btn btn-ghost"
-              to={`/visualization?path=${encodeURIComponent(selectedPath || "")}`}
-            >
-              Back to Visualization
-            </Link>
-          </div>
-
-          {error && <div className="alert alert-error" style={{ marginBottom: 0 }}>{error}</div>}
-        </div>
-
-        <div
-          className="card"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1.2fr 1fr",
-            gap: 14,
-            alignItems: "center",
-          }}
-        >
+      <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr", gap: "24px" }}>
+        <div className="stk-card" style={{ justifyContent: "space-between" }}>
           <div>
             <div className="card-title">Executive AI Verdict</div>
-            <div style={{ fontFamily: "var(--font-display)", fontSize: 30, color: "#e8f4ff", marginBottom: 10 }}>
-              {analytics?.report?.headline || "Run analytics to generate report"}
+            <div style={{ fontSize: "28px", fontWeight: "700", color: "#111", lineHeight: 1.2, marginBottom: "16px" }}>
+              {analytics?.report?.headline || "Run analytics to generate standard compliance report."}
             </div>
-            <div className="text-mono" style={{ color: "rgba(200,216,240,0.65)" }}>
-              Location: {analytics?.location_code || "N/A"} | Frames: {summary.frames_total ?? 0} | Peak volume:
-              {" "}{summary.peak_vehicle_count ?? 0}
-            </div>
-          </div>
-          <div
-            style={{
-              background: "var(--bg-elevated)",
-              border: "1px solid var(--border)",
-              borderRadius: 14,
-              padding: 18,
-            }}
-          >
-            <div className="stat-label">Junction Grade</div>
-            <div style={{ fontFamily: "var(--font-display)", fontSize: 56, color: "var(--cyan)", lineHeight: 1 }}>
-              {grade}
-            </div>
-            <div className={`badge ${gradeBadge(readiness)}`} style={{ marginTop: 10 }}>
-              <span className="badge-dot" />
-              Readiness {readiness.toFixed(1)}
-            </div>
-            <div className="text-mono" style={{ marginTop: 10, color: "rgba(200,216,240,0.58)" }}>
-              Projected delay reduction if plan applied: {cumulativeReduction.toFixed(1)}%
+            <div style={{ color: "#737373", fontSize: "14px", fontWeight: "500" }}>
+              Location: <b>{analytics?.location_code || "N/A"}</b> &nbsp;&nbsp;|&nbsp;&nbsp; Frames: <b>{summary.frames_total ?? 0}</b> &nbsp;&nbsp;|&nbsp;&nbsp; Peak volume: <b>{summary.peak_vehicle_count ?? 0}</b>
             </div>
           </div>
         </div>
 
-        <div className="stat-row" style={{ marginBottom: 0 }}>
-          <div className="stat-card">
-            <div className="stat-label">Throughput Index</div>
-            <div className="stat-value">{Number(kpis.throughput_index || 0).toFixed(1)}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Stability Index</div>
-            <div className="stat-value">{Number(kpis.stability_index || 0).toFixed(1)}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Safety Index</div>
-            <div className="stat-value">{Number(kpis.safety_index || 0).toFixed(1)}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Avg Speed</div>
-            <div className="stat-value">
-              {Number(summary.avg_speed_kmh || 0).toFixed(1)}
-              <span className="stat-unit">km/h</span>
-            </div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">High Congestion</div>
-            <div className="stat-value">{Number((summary.high_congestion_ratio || 0) * 100).toFixed(1)}%</div>
-          </div>
-        </div>
-
-        <div className="panel-grid panel-grid-2">
-          <div className="card" style={{ minHeight: 330 }}>
-            <div className="card-title">KPI Radar Profile</div>
-            <div style={{ height: 255 }}>
-              <Radar
-                data={kpiRadarData}
-                options={{
-                  responsive: true,
-                  maintainAspectRatio: false,
-                  plugins: { legend: { labels: { color: "rgba(220,240,255,0.92)" } } },
-                  scales: {
-                    r: {
-                      angleLines: { color: "rgba(0,212,255,0.15)" },
-                      grid: { color: "rgba(0,212,255,0.15)" },
-                      pointLabels: { color: "rgba(220,240,255,0.85)" },
-                      ticks: { display: false },
-                      min: 0,
-                      max: 100,
-                    },
-                  },
-                }}
-              />
-            </div>
-          </div>
-
-          <div className="card" style={{ minHeight: 330 }}>
-            <div className="card-title">Before vs Projected After</div>
-            <div style={{ height: 255 }}>
-              <Bar
-                data={beforeAfterData}
-                options={{
-                  responsive: true,
-                  maintainAspectRatio: false,
-                  plugins: { legend: { labels: { color: "rgba(220,240,255,0.92)" } } },
-                  scales: { x: chartAxis, y: chartAxis },
-                }}
-              />
-            </div>
-            <div className="text-mono" style={{ marginTop: 8, color: "rgba(200,216,240,0.58)" }}>
-              Congestion severity index: {congestionBase}% -&gt; {congestionAfter}% (projected)
-            </div>
-          </div>
-
-          <div className="card" style={{ minHeight: 330 }}>
-            <div className="card-title">Risk Trajectory and Mobility Recovery</div>
-            <div style={{ height: 255 }}>
-              <Line
-                data={riskTrendData}
-                options={{
-                  responsive: true,
-                  maintainAspectRatio: false,
-                  plugins: { legend: { labels: { color: "rgba(220,240,255,0.92)" } } },
-                  scales: {
-                    x: chartAxis,
-                    y: { ...chartAxis, min: 0, max: 1 },
-                  },
-                }}
-              />
-            </div>
-          </div>
-
-          <div className="card" style={{ minHeight: 330 }}>
-            <div className="card-title">Hotspot Evidence Snapshot</div>
-            <div className="json-viewer" style={{ maxHeight: 255 }}>
-{JSON.stringify(
-  {
-    density: (hot.density || []).slice(0, 6),
-    stopped: (hot.stopped || []).slice(0, 6),
-    clusters: (hot.clusters || []).slice(0, 6),
-  },
-  null,
-  2,
-)}
-            </div>
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-title">Improvement Plan (Prioritized)</div>
-          <div style={{ display: "grid", gap: 10 }}>
-            {(plan || []).length === 0 ? (
-              <div className="alert alert-info" style={{ marginBottom: 0 }}>
-                No improvement plan available for this replay yet.
-              </div>
-            ) : (
-              plan.map((p, idx) => (
-                <div
-                  key={`${idx}-${p.title}`}
-                  style={{
-                    border: "1px solid var(--border)",
-                    borderRadius: 12,
-                    padding: 12,
-                    background: "var(--bg-elevated)",
-                    display: "grid",
-                    gridTemplateColumns: "auto 1fr auto",
-                    gap: 10,
-                    alignItems: "center",
-                  }}
-                >
-                  <div className="badge badge-info">P{idx + 1}</div>
-                  <div>
-                    <div style={{ color: "#e8f4ff", fontWeight: 700, marginBottom: 3 }}>{p.title}</div>
-                    <div className="text-mono" style={{ color: "rgba(200,216,240,0.62)", marginBottom: 2 }}>
-                      {p.impact}
-                    </div>
-                    <div className="text-mono" style={{ color: "rgba(200,216,240,0.52)" }}>
-                      Evidence: {p.evidence}
-                    </div>
-                  </div>
-                  <div style={{ textAlign: "right" }}>
-                    <div className="badge badge-success" style={{ marginBottom: 6 }}>{p.priority}</div>
-                    <div className="text-cyan text-mono">-{Number(p.expected_delay_reduction_pct || 0).toFixed(1)}%</div>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        <div className="panel-grid panel-grid-2">
-          <div className="card">
-            <div className="card-title">Operational Feedback</div>
-            <div className="log-terminal" style={{ maxHeight: 220 }}>
-              {(feedback || []).length === 0 ? (
-                <div className="text-muted">No feedback available.</div>
-              ) : (
-                feedback.map((line, idx) => <div key={`${idx}-${line}`}>• {line}</div>)
-              )}
-            </div>
-          </div>
-          <div className="card">
-            <div className="card-title">Decision Notes</div>
-            <div className="alert alert-info" style={{ marginBottom: 10 }}>
-              The report combines congestion persistence, incident recurrence, and motion stability to produce
-              a practical engineering roadmap for this intersection.
-            </div>
-            <div className="json-viewer" style={{ maxHeight: 170 }}>
-{JSON.stringify(
-  {
-    projected_delay_reduction_pct: cumulativeReduction,
-    congestion_before_pct: congestionBase,
-    congestion_after_pct: congestionAfter,
-    readiness_grade: grade,
-    monitored_path: analytics?.path || selectedPath,
-  },
-  null,
-  2,
-)}
-            </div>
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-title">Disaster Management (Embedded in Report)</div>
-          <div className="stat-row" style={{ marginBottom: 10 }}>
-            <div className="stat-card">
-              <div className="stat-label">Disaster Index</div>
-              <div className="stat-value">{Number(disaster?.disaster_index || 0).toFixed(1)}</div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-label">Status</div>
-              <div style={{ marginTop: 6 }} className={`badge ${statusBadge(disaster?.status)}`}>
-                <span className="badge-dot" />
-                {disaster?.status || "STABLE"}
-              </div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-label">High Zones</div>
-              <div className="stat-value">{Number(disaster?.zone_summary?.HIGH || 0)}</div>
-            </div>
-            <div className="stat-card">
-              <div className="stat-label">Emergency Reroutes</div>
-              <div className="stat-value">{(disaster?.rerouting_plan || []).length}</div>
-            </div>
-          </div>
-
-          <div className="panel-grid panel-grid-2">
-            <div className="log-terminal" style={{ maxHeight: 220 }}>
-              {(disaster?.playbook || []).length === 0 ? (
-                <div className="text-muted">No disaster playbook generated.</div>
-              ) : (
-                (disaster?.playbook || []).map((line, idx) => <div key={`${idx}-${line}`}>• {line}</div>)
-              )}
-            </div>
-            <div className="json-viewer" style={{ maxHeight: 220 }}>
-{JSON.stringify(
-  {
-    zone_summary: disaster?.zone_summary,
-    rerouting_plan: (disaster?.rerouting_plan || []).slice(0, 4),
-    pothole_predictions: (disaster?.pothole_model?.prediction_zones || []).slice(0, 6),
-    best_twin_scenario: disaster?.digital_twin?.best_scenario || null,
-  },
-  null,
-  2,
-)}
+        <div className="stk-card" style={{ background: "#fafafa" }}>
+          <div className="card-title">Junction Grade</div>
+          <div style={{ display: "flex", alignItems: "baseline", gap: "16px" }}>
+            <div style={{ fontSize: "64px", fontWeight: "900", color: gradeColor(readiness), lineHeight: 1 }}>{grade}</div>
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <span className="shdcn-badge shdcn-badge-solid" style={{ marginBottom: "8px", alignSelf: "flex-start" }}>Readiness {readiness.toFixed(1)}</span>
+              <span style={{ fontSize: "12px", color: "#737373", fontWeight: "500" }}>Projected reduction: {cumulativeReduction.toFixed(1)}%</span>
             </div>
           </div>
         </div>
       </div>
-    </>
+
+      <div className="stk-card" style={{ padding: "32px 24px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "16px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Throughput Index</div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{Number(kpis.throughput_index || 0).toFixed(1)}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Stability Index</div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{Number(kpis.stability_index || 0).toFixed(1)}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Safety Index</div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{Number(kpis.safety_index || 0).toFixed(1)}</div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>Avg Speed</div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{Number(summary.avg_speed_kmh || 0).toFixed(1)}<span style={{ fontSize:"12px", color:"#a3a3a3", marginLeft:"4px"}}>km/h</span></div></div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}><div style={{ fontSize: "12px", color: "#737373", fontWeight: "600" }}>High Congestion</div><div style={{ fontSize: "24px", fontWeight: "800", color: "#111" }}>{Number((summary.high_congestion_ratio || 0) * 100).toFixed(1)}%</div></div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "24px" }}>
+        <div className="stk-card" style={{ height: "340px" }}>
+          <div className="card-title">KPI Radar Profile</div>
+          <div style={{ flex: 1 }}>
+            <Radar data={kpiRadarData} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { r: { angleLines: { color: "#f0f0f0" }, grid: { color: "#f0f0f0" }, pointLabels: { color: "#737373", font: { family:"Inter", size: 10, weight: "600" } }, ticks: { display: false }, min: 0, max: 100 } } }} />
+          </div>
+        </div>
+
+        <div className="stk-card" style={{ height: "340px" }}>
+          <div className="card-title">Before vs Projected</div>
+          <div style={{ flex: 1 }}>
+            <Bar data={beforeAfterData} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 8, font: { size: 11, family:"Inter" } } } }, scales: { x: { grid: {display:false}, border:{display:false}, ticks:{color:"#737373", font:{size:11}} }, y: chartAxis } }} />
+          </div>
+        </div>
+
+        <div className="stk-card" style={{ height: "340px" }}>
+          <div className="card-title">Risk Trajectory</div>
+          <div style={{ flex: 1 }}>
+            <Line data={riskTrendData} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 8, font: { size: 11, family:"Inter" } } } }, scales: { x: { display: false }, y: { ...chartAxis, min: 0 } } }} />
+          </div>
+        </div>
+      </div>
+
+      <div className="stk-card">
+        <div className="card-title">Improvement Plan Recommendations</div>
+        {plan.length === 0 ? (
+          <div style={{ color: "#737373", fontSize: "14px" }}>No improvement plan available for this replay yet.</div>
+        ) : (
+          <table className="shdcn-table">
+            <thead>
+              <tr>
+                <th>Priority</th>
+                <th>Recommendation</th>
+                <th>Evidence</th>
+                <th style={{ textAlign: "right" }}>Impact</th>
+              </tr>
+            </thead>
+            <tbody>
+              {plan.map((p, idx) => (
+                <tr key={`${idx}-${p.title}`}>
+                  <td style={{ fontWeight: "700" }}>P{idx + 1}</td>
+                  <td style={{ fontWeight: "600", color: "#111" }}>{p.title}<div style={{ fontSize: "12px", color: "#737373", marginTop: "4px", fontWeight:"400" }}>{p.impact}</div></td>
+                  <td style={{ fontSize: "13px", color: "#737373", maxWidth: "300px" }}>{p.evidence}</td>
+                  <td style={{ textAlign: "right", fontWeight: "700" }}>-{Number(p.expected_delay_reduction_pct || 0).toFixed(1)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+    </div>
   );
 }

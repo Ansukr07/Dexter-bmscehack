@@ -1,4 +1,4 @@
-﻿__pycache__/
+__pycache__/
 **/__pycache__/
 *.py[cod]
 
@@ -14,3 +14,7 @@ venv/
 # Frontend artifacts
 web/node_modules/
 web/dist/
+
+# Large binaries/files
+*.mp4
+location/
